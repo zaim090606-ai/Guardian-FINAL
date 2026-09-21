@@ -1,175 +1,702 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
-void main() {
-  runApp(const Home());
-}
+import '../services/emergency_service.dart';
+import '../services/voice_service.dart';
 
-class Home extends StatelessWidget {
+class Home extends StatefulWidget {
   const Home({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Guardian Home UI',
-      theme: ThemeData(
-        scaffoldBackgroundColor: Colors.white,
-        fontFamily: 'Roboto',
-      ),
-      home: const GuardianHomeScreen(),
-    );
-  }
+  State<Home> createState() => _HomeState();
 }
 
-class GuardianHomeScreen extends StatelessWidget {
-  const GuardianHomeScreen({super.key});
+class _HomeState extends State<Home> {
+  GoogleMapController? _mapController;
+  StreamSubscription<Position>? _positionStream;
 
-  void _triggerSos(BuildContext context) {
+  LatLng _currentLatLng = const LatLng(28.6139, 77.2090);
+  bool _isLoadingMap = true;
+  bool _isBlackBoxExpanded = false;
+  bool _userIsPanningMap = false;
+
+  static const String _contactKey = "emergency_contact_number";
+  String _emergencyContactNumber = "";
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedContact();
+    _startLiveLocationTracking();
+    _initVoiceService();
+  }
+
+  void _initVoiceService() {
+    VoiceService.startListening(
+      onSosTriggeredCallback: () {
+        if (mounted) {
+          _triggerSos("Voice Keyword Trigger");
+        }
+      },
+    );
+  }
+
+  Future<void> _loadSavedContact() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedNumber = prefs.getString(_contactKey);
+    if (savedNumber != null && savedNumber.isNotEmpty && mounted) {
+      setState(() {
+        _emergencyContactNumber = savedNumber;
+      });
+    }
+  }
+
+  Future<void> _saveContact(String number) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_contactKey, number);
+    if (mounted) {
+      setState(() {
+        _emergencyContactNumber = number;
+      });
+    }
+  }
+
+  Future<void> _startLiveLocationTracking() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      if (mounted) setState(() => _isLoadingMap = false);
+      return;
+    }
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        if (mounted) setState(() => _isLoadingMap = false);
+        return;
+      }
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      if (mounted) setState(() => _isLoadingMap = false);
+      return;
+    }
+
+    try {
+      Position initialPosition = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
+      );
+      if (mounted) {
+        setState(() {
+          _currentLatLng = LatLng(initialPosition.latitude, initialPosition.longitude);
+          _isLoadingMap = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isLoadingMap = false);
+    }
+
+    const locationSettings = LocationSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 5,
+    );
+
+    _positionStream = Geolocator.getPositionStream(locationSettings: locationSettings)
+        .listen((Position position) {
+      if (!mounted) return;
+      setState(() {
+        _currentLatLng = LatLng(position.latitude, position.longitude);
+      });
+
+      if (!_userIsPanningMap) {
+        _mapController?.animateCamera(
+          CameraUpdate.newLatLng(_currentLatLng),
+        );
+      }
+    });
+  }
+
+  Future<void> _makePhoneCall(String phoneNumber) async {
+    final Uri launchUri = Uri(scheme: 'tel', path: phoneNumber);
+    if (await canLaunchUrl(launchUri)) {
+      await launchUrl(launchUri);
+    } else if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Could not launch phone dialer for $phoneNumber")),
+      );
+    }
+  }
+
+  void _showAddEditContactDialog() {
+    final numberController = TextEditingController(text: _emergencyContactNumber);
+
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('SOS Triggered'),
-        content: const Text('Emergency services and contacts are being notified.'),
+      builder: (dialogContext) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text("Emergency Contact"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text("Enter the phone number for emergency dispatch and SMS alerts:"),
+              const SizedBox(height: 12),
+              TextField(
+                controller: numberController,
+                keyboardType: TextInputType.phone,
+                decoration: const InputDecoration(
+                  labelText: "Phone Number",
+                  hintText: "e.g. 9876543210",
+                  border: OutlineInputBorder(),
+                  prefixIcon: Icon(Icons.phone),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                numberController.dispose();
+                Navigator.pop(dialogContext);
+              },
+              child: const Text("Cancel", style: TextStyle(color: Colors.grey)),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.black,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              onPressed: () async {
+                final text = numberController.text.trim();
+                if (text.isNotEmpty) {
+                  await _saveContact(text);
+                  numberController.dispose();
+                  if (dialogContext.mounted) {
+                    Navigator.pop(dialogContext);
+                  }
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text("Emergency Contact Saved!")),
+                    );
+                  }
+                }
+              },
+              child: const Text("Save Number", style: TextStyle(color: Colors.white)),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showCustomKeywordsDialog() {
+    final keywordController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (stfContext, setDialogState) {
+            return AlertDialog(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              title: const Row(
+                children: [
+                  Icon(Icons.record_voice_over, color: Colors.black),
+                  SizedBox(width: 8),
+                  Text("Voice Trigger Keywords", style: TextStyle(fontSize: 18)),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    "Active Trigger Words:",
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    children: VoiceService.activeKeywords.map((word) {
+                      return Chip(
+                        label: Text(word, style: const TextStyle(fontSize: 11)),
+                        backgroundColor: Colors.grey.shade100,
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: keywordController,
+                    decoration: const InputDecoration(
+                      labelText: "Add Secret Trigger Word",
+                      hintText: "e.g. pineapple, code red",
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    keywordController.dispose();
+                    Navigator.pop(dialogContext);
+                  },
+                  child: const Text("Done", style: TextStyle(color: Colors.grey)),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.black,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  onPressed: () async {
+                    final text = keywordController.text.trim();
+                    if (text.isNotEmpty) {
+                      bool added = await VoiceService.addCustomKeyword(text);
+                      if (added) {
+                        keywordController.clear();
+                        if (stfContext.mounted) {
+                          setDialogState(() {});
+                        }
+                        if (mounted) setState(() {});
+                      }
+                    }
+                  },
+                  child: const Text("Add Word", style: TextStyle(color: Colors.white)),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _triggerSos([String level = "Manual SOS Button"]) async {
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.red, size: 28),
+            SizedBox(width: 8),
+            Text("SOS Activated!"),
+          ],
+        ),
+        content: Text(
+          _emergencyContactNumber.isNotEmpty
+              ? "Dispatching emergency background SMS to $_emergencyContactNumber with live location..."
+              : "No contact set! Please configure an emergency number.",
+        ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('OK'),
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text("OK", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
           ),
         ],
       ),
     );
+
+    try {
+      await EmergencyService.triggerEmergencyDispatch(
+        force: 0.0,
+        level: level,
+      );
+    } catch (e) {
+      debugPrint("SOS Dispatch Error: $e");
+    }
+  }
+
+  @override
+  void dispose() {
+    _positionStream?.cancel();
+    _mapController?.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: const Color(0xFFF9F9F9),
+      appBar: AppBar(
+        title: const Text(
+          "Guardian Home",
+          style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
+        ),
+        backgroundColor: Colors.white,
+        elevation: 0,
+        centerTitle: true,
+      ),
       body: SafeArea(
         child: SingleChildScrollView(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 16.0),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Top Header
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text(
-                      'Guardian',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.black,
-                      ),
-                    ),
-                    Row(
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: const BoxDecoration(
-                            color: Colors.black,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        const Text(
-                          'Monitoring',
-                          style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.black,
-                          ),
-                        ),
-                      ],
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Guardian AI Black Box Capsule
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeInOut,
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: Colors.black.withOpacity(0.12),
+                    width: 1.2,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.03),
+                      blurRadius: 10,
+                      offset: const Offset(0, 4),
                     ),
                   ],
                 ),
-                const SizedBox(height: 32),
-
-                // Main Status Texts
-                const Text(
-                  "You're protected.",
-                  style: TextStyle(
-                    fontSize: 32,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.black,
-                    letterSpacing: -0.5,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  'Guardian is monitoring supported signals.',
-                  style: TextStyle(
-                    fontSize: 16,
-                    color: Colors.grey.shade700,
-                  ),
-                ),
-                const SizedBox(height: 24),
-
-                // Interactive Hold for SOS Button
-                SosHoldButton(
-                  onSosTriggered: () => _triggerSos(context),
-                ),
-                const SizedBox(height: 24),
-
-                // Current Location Card
-                const StatusCard(
-                  title: 'Current location',
-                  statusText: 'Available',
-                  actionText: 'Share my location',
-                ),
-                const SizedBox(height: 16),
-
-                // Trusted Contacts Card
-                const StatusCard(
-                  title: 'Trusted contacts',
-                  statusText: 'Ready',
-                  actionText: 'Manage contacts',
-                ),
-                const SizedBox(height: 16),
-
-                // Guardian AI Info Card
-                Container(
-                  width: double.infinity,
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: Colors.grey.shade300,
-                      width: 1,
-                    ),
-                  ),
-                  padding: const EdgeInsets.all(20),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Guardian AI',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.black,
-                        ),
+                child: Column(
+                  children: [
+                    InkWell(
+                      onTap: () {
+                        setState(() {
+                          _isBlackBoxExpanded = !_isBlackBoxExpanded;
+                        });
+                      },
+                      child: Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withOpacity(0.05),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(
+                              Icons.security_rounded,
+                              color: Colors.black,
+                              size: 16,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          const Expanded(
+                            child: Text(
+                              "Guardian AI Voice Shield",
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.black,
+                              ),
+                            ),
+                          ),
+                          ValueListenableBuilder<bool>(
+                            valueListenable: VoiceService.isEnabledNotifier,
+                            builder: (context, isEnabled, child) {
+                              return Transform.scale(
+                                scale: 0.8,
+                                child: Switch(
+                                  value: isEnabled,
+                                  activeColor: Colors.green,
+                                  onChanged: (val) {
+                                    VoiceService.toggleVoiceMonitoring(val);
+                                  },
+                                ),
+                              );
+                            },
+                          ),
+                          Icon(
+                            _isBlackBoxExpanded
+                                ? Icons.keyboard_arrow_up
+                                : Icons.keyboard_arrow_down,
+                            size: 18,
+                            color: Colors.grey,
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 12),
-                      Text(
-                        'Assists with event context, explanations and emergency summaries. It does not independently authorize emergency calls.',
-                        style: TextStyle(
-                          fontSize: 15,
-                          color: Colors.grey.shade700,
-                          height: 1.4,
+                    ),
+                    if (_isBlackBoxExpanded) ...[
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 8.0),
+                        child: Divider(height: 1, color: Color(0xFFEEEEEE)),
+                      ),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text(
+                                  "Rolling Buffer Transcript:",
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.grey,
+                                  ),
+                                ),
+                                InkWell(
+                                  onTap: _showCustomKeywordsDialog,
+                                  child: const Row(
+                                    children: [
+                                      Icon(Icons.add_circle_outline, size: 14, color: Colors.blue),
+                                      SizedBox(width: 4),
+                                      Text(
+                                        "Keywords",
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: Colors.blue,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            ValueListenableBuilder<String>(
+                              valueListenable: VoiceService.transcriptNotifier,
+                              builder: (context, transcript, child) {
+                                return Text(
+                                  transcript.isNotEmpty
+                                      ? '"$transcript"'
+                                      : "Listening for keywords (${VoiceService.activeKeywords.take(3).join(', ')}...)",
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontStyle: transcript.isNotEmpty
+                                        ? FontStyle.normal
+                                        : FontStyle.italic,
+                                    color: transcript.isNotEmpty
+                                        ? Colors.black87
+                                        : Colors.grey.shade500,
+                                  ),
+                                );
+                              },
+                            ),
+                          ],
                         ),
                       ),
                     ],
-                  ),
+                  ],
                 ),
-                const SizedBox(height: 16),
+              ),
+              const SizedBox(height: 20),
 
-              
-              ],
-            ),
+              // Embedded Live Google Map Card
+              Container(
+                height: 220,
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.grey.shade300),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.04),
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: _isLoadingMap
+                      ? const Center(child: CircularProgressIndicator())
+                      : GoogleMap(
+                          initialCameraPosition: CameraPosition(
+                            target: _currentLatLng,
+                            zoom: 16.0,
+                          ),
+                          myLocationEnabled: true,
+                          myLocationButtonEnabled: true,
+                          markers: {
+                            Marker(
+                              markerId: const MarkerId('current_user'),
+                              position: _currentLatLng,
+                              infoWindow: const InfoWindow(title: 'Your Location'),
+                            ),
+                          },
+                          onCameraMoveStarted: () {
+                            _userIsPanningMap = true;
+                          },
+                          onMapCreated: (controller) {
+                            _mapController = controller;
+                          },
+                        ),
+                ),
+              ),
+              const SizedBox(height: 28),
+
+              const Text(
+                "EMERGENCY OVERRIDE",
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 1.2,
+                  color: Colors.grey,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                "Press & Hold SOS for 3 Seconds",
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.black,
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              Center(
+                child: SosHoldButton(
+                  onSosTriggered: () => _triggerSos("Manual SOS Button"),
+                ),
+              ),
+              const SizedBox(height: 32),
+
+              Row(
+                children: [
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.grey.shade300),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Icon(Icons.contact_phone_outlined, color: Colors.black),
+                              InkWell(
+                                onTap: _showAddEditContactDialog,
+                                borderRadius: BorderRadius.circular(20),
+                                child: const Padding(
+                                  padding: EdgeInsets.all(4.0),
+                                  child: Row(
+                                    children: [
+                                      Icon(Icons.edit_outlined, size: 16, color: Colors.blue),
+                                      SizedBox(width: 2),
+                                      Text(
+                                        "Edit",
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: Colors.blue,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            "Emergency Contact",
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  _emergencyContactNumber.isNotEmpty
+                                      ? _emergencyContactNumber
+                                      : "No Contact Set",
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.black,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              InkWell(
+                                onTap: () {
+                                  if (_emergencyContactNumber.isNotEmpty) {
+                                    _makePhoneCall(_emergencyContactNumber);
+                                  } else {
+                                    _showAddEditContactDialog();
+                                  }
+                                },
+                                borderRadius: BorderRadius.circular(30),
+                                child: Container(
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: Colors.green.shade50,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: const Icon(
+                                    Icons.phone,
+                                    color: Colors.green,
+                                    size: 18,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.grey.shade300),
+                      ),
+                      child: const Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(Icons.location_on_outlined, color: Colors.black),
+                          SizedBox(height: 18),
+                          Text(
+                            "GPS Tracking",
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey,
+                            ),
+                          ),
+                          SizedBox(height: 4),
+                          Text(
+                            "High Accuracy",
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.black,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
       ),
@@ -177,9 +704,6 @@ class GuardianHomeScreen extends StatelessWidget {
   }
 }
 
-// ==========================================
-// SOS BUTTON WITH 5-SECOND COUNTDOWN
-// ==========================================
 class SosHoldButton extends StatefulWidget {
   final VoidCallback onSosTriggered;
 
@@ -189,242 +713,119 @@ class SosHoldButton extends StatefulWidget {
   State<SosHoldButton> createState() => _SosHoldButtonState();
 }
 
-class _SosHoldButtonState extends State<SosHoldButton> {
-  static const int _initialCountdown = 5;
-  int _countdown = _initialCountdown;
-  bool _isHolding = false;
-  Timer? _timer;
+class _SosHoldButtonState extends State<SosHoldButton>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  Timer? _hapticTimer;
 
-  void _startCountdown() {
-    setState(() {
-      _isHolding = true;
-      _countdown = _initialCountdown;
-    });
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 3),
+    )..addStatusListener((status) {
+        if (status == AnimationStatus.completed) {
+          _stopHapticTimer();
+          HapticFeedback.vibrate();
+          widget.onSosTriggered();
+          _controller.reset();
+        }
+      });
+  }
 
-    _timer?.cancel();
-    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (_countdown > 1) {
-        setState(() {
-          _countdown--;
-        });
-      } else {
-        // Countdown completed
-        _cancelCountdown();
-        widget.onSosTriggered();
-      }
+  void _startHapticFeedback() {
+    HapticFeedback.heavyImpact();
+    _hapticTimer?.cancel();
+    _hapticTimer = Timer.periodic(const Duration(milliseconds: 300), (_) {
+      HapticFeedback.selectionClick();
     });
   }
 
-  void _cancelCountdown() {
-    _timer?.cancel();
-    if (mounted) {
-      setState(() {
-        _isHolding = false;
-        _countdown = _initialCountdown;
-      });
+  void _stopHapticTimer() {
+    _hapticTimer?.cancel();
+    _hapticTimer = null;
+  }
+
+  void _onTapDown(TapDownDetails details) {
+    _startHapticFeedback();
+    _controller.forward();
+  }
+
+  void _onTapUp(TapUpDetails details) {
+    _resetHold();
+  }
+
+  void _onTapCancel() {
+    _resetHold();
+  }
+
+  void _resetHold() {
+    _stopHapticTimer();
+    if (_controller.isAnimating) {
+      _controller.reset();
     }
   }
 
   @override
   void dispose() {
-    _timer?.cancel();
+    _stopHapticTimer();
+    _controller.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTapDown: (_) => _startCountdown(),
-      onTapUp: (_) => _cancelCountdown(),
-      onTapCancel: () => _cancelCountdown(),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        width: double.infinity,
-        height: 60,
-        decoration: BoxDecoration(
-          color: _isHolding ? Colors.red.shade700 : Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: Colors.red.shade700,
-            width: 1.5,
-          ),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 16.0),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              _isHolding
-                  ? 'RELEASE TO CANCEL'
-                  : 'HOLD FOR SOS',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-                color: _isHolding ? Colors.white : Colors.black,
-                letterSpacing: 0.5,
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        return GestureDetector(
+          onTapDown: _onTapDown,
+          onTapUp: _onTapUp,
+          onTapCancel: _onTapCancel,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              SizedBox(
+                width: 170,
+                height: 170,
+                child: CircularProgressIndicator(
+                  value: _controller.value,
+                  strokeWidth: 8,
+                  backgroundColor: Colors.grey.shade200,
+                  valueColor: const AlwaysStoppedAnimation<Color>(Colors.black),
+                ),
               ),
-            ),
-            if (_isHolding)
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                width: 140,
+                height: 140,
                 decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(8),
+                  color: Colors.black,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.15),
+                      blurRadius: 10,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
                 ),
-                child: Text(
-                  '${_countdown}s',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.red.shade700,
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ==========================================
-// REUSABLE UI WIDGETS
-// ==========================================
-class StatusCard extends StatelessWidget {
-  final String title;
-  final String statusText;
-  final String actionText;
-
-  const StatusCard({
-    super.key,
-    required this.title,
-    required this.statusText,
-    required this.actionText,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: Colors.grey.shade300,
-          width: 1,
-        ),
-      ),
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: const TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-              color: Colors.black,
-            ),
-          ),
-          const SizedBox(height: 16),
-          
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 14.0),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade100,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Text(
-              statusText,
-              style: const TextStyle(
-                fontSize: 15,
-                color: Colors.black87,
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          
-          Container(
-            width: double.infinity,
-            height: 48,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: Colors.grey.shade400,
-                width: 1,
-              ),
-            ),
-            child: Material(
-              color: Colors.transparent,
-              child: InkWell(
-                borderRadius: BorderRadius.circular(12),
-                onTap: () {},
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                    child: Text(
-                      actionText,
-                      style: const TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w400,
-                        color: Colors.black,
-                      ),
+                child: const Center(
+                  child: Text(
+                    "SOS",
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 2,
                     ),
                   ),
                 ),
               ),
-            ),
+            ],
           ),
-        ],
-      ),
-    );
-  }
-}
-
-class ActionListItem extends StatelessWidget {
-  final String title;
-
-  const ActionListItem({
-    super.key,
-    required this.title,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      height: 56,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: Colors.grey.shade300,
-          width: 1,
-        ),
-      ),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: () {},
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0),
-              child: Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w400,
-                  color: Colors.black,
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
+        );
+      },
     );
   }
 }

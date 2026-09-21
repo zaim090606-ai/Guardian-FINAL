@@ -46,3 +46,12 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Firebase duplicate/local config
+android/app/google-services (2).json
+# Android/Gradle generated files
+/android/build/
