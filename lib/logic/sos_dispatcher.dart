@@ -172,11 +172,14 @@ String buildSosText({
   required double uncertaintyM,
   required String trigger,
   String summary = '',
+  bool simulated = false,
 }) {
   final hasLocation = !(lat == 0 && lng == 0) && source != 'unknown';
   final String where;
   if (hasLocation) {
-    final label = source == 'estimated' ? 'ESTIMATED' : 'GPS';
+    final label = source == 'estimated'
+        ? (simulated ? 'ESTIMATED, SIMULATED GPS LOSS' : 'ESTIMATED')
+        : 'GPS';
     where = 'https://maps.google.com/?q=$lat,$lng ($label +/-${uncertaintyM.round()}m)';
   } else {
     where = 'unavailable';
