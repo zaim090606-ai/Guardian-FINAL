@@ -6,6 +6,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
+import '../logic/pdr_config.dart';
 import '../logic/pdr_engine.dart';
 
 /// Sensor and GPS plumbing around [PdrEngine].
@@ -19,7 +20,9 @@ class PdrService {
   factory PdrService() => _instance;
   PdrService._internal();
 
-  final PdrEngine _engine = PdrEngine();
+  final PdrConfig config = PdrConfig();
+  late final PdrEngine _engine = PdrEngine(config: config);
+  int rejectedMagSamples = 0;
   final StepDetector _stepDetector = StepDetector();
 
   StreamSubscription<UserAccelerometerEvent>? _linearSub;
@@ -40,6 +43,7 @@ class PdrService {
   bool simulateGpsLoss = false;
 
   int get steps => _engine.steps;
+  PdrEngine get engine => _engine;
   double? get heading => _heading;
   int? _lastRealGpsMs;
   double? _lastGpsAccuracy;
@@ -63,7 +67,10 @@ class PdrService {
 
       _accelSub = accelerometerEventStream(
         samplingPeriod: SensorInterval.normalInterval,
-      ).listen((e) => _lastAccel = e,
+      ).listen((e) {
+        _lastAccel = e;
+        _engine.onGravity(e.x, e.y, e.z);
+      },
           onError: (Object e) => debugPrint('PDR accel error: $e'));
 
       _magSub = magnetometerEventStream(
@@ -81,6 +88,10 @@ class PdrService {
   void _onMagnetometer(MagnetometerEvent m) {
     final a = _lastAccel;
     if (a == null) return;
+    if (config.compassGating && !magneticFieldPlausible(m.x, m.y, m.z)) {
+      rejectedMagSamples++;
+      return;
+    }
     final h = headingFromSensors(
         ax: a.x, ay: a.y, az: a.z, mx: m.x, my: m.y, mz: m.z);
     if (h == null) return;
@@ -138,6 +149,8 @@ class PdrService {
       p.longitude,
       p.accuracy,
       p.timestamp.millisecondsSinceEpoch,
+      speedMps: p.speed >= 0 ? p.speed : null,
+      courseDeg: p.heading >= 0 ? p.heading : null,
     );
   }
 
