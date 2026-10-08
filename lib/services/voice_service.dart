@@ -25,7 +25,8 @@ import 'yamnet_service.dart';
 /// (`startListening(background: true)`); the UI isolate just mirrors the
 /// transcript and forwards the on/off switch, so two recorders never compete
 /// for the microphone. Sound classes come from YAMNet and spoken keywords
-/// from Whisper. Either engine can be missing (permission, model load
+/// from Whisper, which only runs on a chunk after YAMNet flagged speech, a
+/// scream or a siren, or after the user taps the listen button. Either engine can be missing (permission, model load
 /// failure, slow device) and the other keeps working.
 class VoiceService {
   static AudioRecorder? _recorder;
@@ -37,6 +38,7 @@ class VoiceService {
   static bool _isTriggered = false;
   static bool _uiAttached = false;
   static int _slowWhisperRuns = 0;
+  static bool _userRequestedTranscript = false;
 
   /// Global state toggle for user privacy
   static final ValueNotifier<bool> isEnabledNotifier = ValueNotifier<bool>(true);
@@ -122,6 +124,17 @@ class VoiceService {
     } catch (e) {
       debugPrint('Could not attach to background service: $e');
     }
+  }
+
+  /// Button: transcribe the next chunk with Whisper regardless of YAMNet.
+  static void requestTranscription({bool fromService = false}) {
+    if (!fromService) {
+      try {
+        FlutterBackgroundService().invoke('voice_transcribe_now');
+      } catch (_) {}
+      return;
+    }
+    _userRequestedTranscript = true;
   }
 
   /// Turn voice monitoring ON or OFF (from the UI or the service isolate).
@@ -262,6 +275,7 @@ class VoiceService {
       bool acousticConfirmed = false;
       String acousticLabel = '';
       double acousticScore = 0;
+      double speechScore = 0;
 
       if (_yamnetService.isAvailable) {
         final results = await _yamnetService.classifySamples(samples);
@@ -270,6 +284,7 @@ class VoiceService {
           hub.lastLabel = r.isDistress ? r.distressLabel : r.topLabel;
           hub.lastScore = r.isDistress ? r.distressScore : r.topScore;
           hub.lastDetectionMs = DateTime.now().millisecondsSinceEpoch;
+          if (r.speechScore > speechScore) speechScore = r.speechScore;
           if (_debouncer.add(r.isDistress)) {
             acousticConfirmed = true;
             acousticLabel = r.distressLabel;
@@ -279,7 +294,15 @@ class VoiceService {
       }
 
       String transcript = '';
-      if (!acousticConfirmed && LocalWhisperService.isAvailable) {
+      final userRequested = _userRequestedTranscript;
+      _userRequestedTranscript = false;
+      if (shouldRunWhisper(
+        whisperAvailable: LocalWhisperService.isAvailable,
+        yamnetAvailable: _yamnetService.isAvailable,
+        speechScore: speechScore,
+        userRequested: userRequested,
+        acousticConfirmed: acousticConfirmed,
+      )) {
         final sw = Stopwatch()..start();
         transcript = await LocalWhisperService.transcribe(filePath);
         sw.stop();

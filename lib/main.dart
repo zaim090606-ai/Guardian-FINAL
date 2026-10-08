@@ -196,6 +196,9 @@ void onStartService(ServiceInstance service) async {
   service.on('voice_enabled').listen((event) {
     VoiceService.toggleVoiceMonitoring(event?['enabled'] == true, fromService: true);
   });
+  service.on('voice_transcribe_now').listen((_) {
+    VoiceService.requestTranscription(fromService: true);
+  });
   service.on('sim_gps_loss').listen((event) {
     PdrService().simulateGpsLoss = event?['enabled'] == true;
   });

@@ -43,12 +43,16 @@ class DistressResult {
   final double distressScore;
   final bool isDistress;
 
+  /// Best score among speech-like classes (speech, shouting, screaming, siren).
+  final double speechScore;
+
   const DistressResult({
     required this.topLabel,
     required this.topScore,
     required this.distressLabel,
     required this.distressScore,
     required this.isDistress,
+    this.speechScore = 0,
   });
 }
 
@@ -68,10 +72,20 @@ class DistressClassifier {
     'Gunshot, gunfire',
   };
 
+  /// Classes that justify spending CPU on a Whisper transcription.
+  static const Set<String> speechLabels = {
+    'Speech',
+    'Shout',
+    'Yell',
+    'Screaming',
+    'Siren',
+  };
+
   final List<String> labels;
   final Set<String> distressLabels;
   final double threshold;
   late final List<int> _distressIdx;
+  late final List<int> _speechIdx;
 
   DistressClassifier(
     this.labels, {
@@ -81,6 +95,10 @@ class DistressClassifier {
     _distressIdx = [
       for (int i = 0; i < labels.length; i++)
         if (distressLabels.contains(labels[i])) i
+    ];
+    _speechIdx = [
+      for (int i = 0; i < labels.length; i++)
+        if (speechLabels.contains(labels[i])) i
     ];
   }
 
@@ -99,7 +117,12 @@ class DistressClassifier {
     final topScore = scores.isEmpty ? 0.0 : scores[top];
     final dLabel = best >= 0 ? labels[best] : '';
     final dScore = best >= 0 ? scores[best] : 0.0;
+    double speech = 0;
+    for (final i in _speechIdx) {
+      if (i < scores.length && scores[i] > speech) speech = scores[i];
+    }
     return DistressResult(
+      speechScore: speech,
       topLabel: topLabel,
       topScore: topScore,
       distressLabel: dLabel,
@@ -125,6 +148,25 @@ class DistressDebouncer {
   }
 
   void reset() => _recent.clear();
+}
+
+/// Decides whether the expensive Whisper pass runs on the current chunk.
+/// YAMNet is the cheap always-on gate: Whisper only runs when YAMNet heard
+/// speech/scream/siren, or the user asked for it. Without YAMNet there is no
+/// gate, so every non-silent chunk is transcribed as before.
+bool shouldRunWhisper({
+  required bool whisperAvailable,
+  required bool yamnetAvailable,
+  required double speechScore,
+  bool userRequested = false,
+  bool acousticConfirmed = false,
+  double speechThreshold = 0.3,
+}) {
+  if (!whisperAvailable) return false;
+  if (acousticConfirmed) return false; // already decided, no need to transcribe
+  if (userRequested) return true;
+  if (!yamnetAvailable) return true;
+  return speechScore >= speechThreshold;
 }
 
 /// Combines the audio engines into one decision. Returns the human-readable

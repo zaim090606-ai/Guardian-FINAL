@@ -131,4 +131,44 @@ void main() {
           isNull);
     });
   });
+
+  group('shouldRunWhisper gate', () {
+    bool run({
+      bool whisper = true,
+      bool yamnet = true,
+      double speech = 0,
+      bool user = false,
+      bool confirmed = false,
+    }) =>
+        shouldRunWhisper(
+          whisperAvailable: whisper,
+          yamnetAvailable: yamnet,
+          speechScore: speech,
+          userRequested: user,
+          acousticConfirmed: confirmed,
+        );
+
+    test('stays off while YAMNet hears no speech', () {
+      expect(run(speech: 0.05), isFalse);
+    });
+    test('runs once YAMNet flags speech/scream/siren', () {
+      expect(run(speech: 0.6), isTrue);
+    });
+    test('runs when the user taps the button', () {
+      expect(run(user: true), isTrue);
+    });
+    test('never runs without the engine or after a confirmed acoustic hit', () {
+      expect(run(whisper: false, user: true, speech: 1), isFalse);
+      expect(run(confirmed: true, speech: 1), isFalse);
+    });
+    test('without YAMNet there is no gate', () {
+      expect(run(yamnet: false), isTrue);
+    });
+  });
+
+  test('classifier reports speechScore from speech-like classes', () {
+    final c = DistressClassifier(['Speech', 'Siren', 'Dog']);
+    expect(c.classify([0.7, 0.0, 0.1]).speechScore, 0.7);
+    expect(c.classify([0.0, 0.0, 0.9]).speechScore, 0.0);
+  });
 }

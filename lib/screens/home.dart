@@ -405,6 +405,12 @@ class _HomeState extends State<Home> {
                               ),
                             ),
                           ),
+                          IconButton(
+                            tooltip: 'Listen for speech now',
+                            visualDensity: VisualDensity.compact,
+                            icon: const Icon(Icons.hearing, size: 18),
+                            onPressed: VoiceService.requestTranscription,
+                          ),
                           ValueListenableBuilder<bool>(
                             valueListenable: VoiceService.isEnabledNotifier,
                             builder: (context, isEnabled, child) {
