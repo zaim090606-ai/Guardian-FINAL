@@ -19,8 +19,9 @@ class RelayService {
   static const String serviceId = 'com.guardian.emergency.relay';
   static const Strategy strategy = Strategy.P2P_CLUSTER;
 
-  /// How long a packet keeps being offered to new peers.
-  static const Duration offerWindow = Duration(minutes: 5);
+  /// Longest a packet keeps being offered to new peers; it is withdrawn
+  /// earlier when the SOS is cancelled (see [stopRelay]).
+  static const Duration offerWindow = Duration(minutes: 30);
 
   final Map<String, SosPacket> _active = {};
   final Map<String, Timer> _expiry = {};

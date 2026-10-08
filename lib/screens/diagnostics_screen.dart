@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 
+import '../logic/pdr_engine.dart' show formatAge;
 import '../logic/sos_dispatcher.dart';
 import '../services/diagnostics_hub.dart';
 import '../services/emergency_service.dart';
@@ -84,6 +85,8 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
             _row('Source', fix == null ? 'none yet' : fix.source.toUpperCase()),
             _row('Uncertainty',
                 fix == null ? '-' : '+/- ${fix.uncertaintyM.toStringAsFixed(1)} m'),
+            if (fix != null && fix.source == 'estimated')
+              _row('Age since last GPS fix', formatAge(fix.ageSinceGpsS)),
             _row('Last real GPS fix',
                 pdr.lastGpsAgeMs == null ? 'never' : '${(pdr.lastGpsAgeMs! / 1000).round()} s ago'),
             _row('Steps counted', '${pdr.steps}'),

@@ -7,7 +7,13 @@ class LocationFix {
   /// 'gps' or 'estimated'.
   final String source;
   final double uncertaintyM;
+
+  /// When the position was measured. For an estimated fix this is the time of
+  /// the last real GPS fix, not "now".
   final int timeMs;
+
+  /// When this fix object was produced ("now").
+  final int generatedAtMs;
 
   const LocationFix({
     required this.lat,
@@ -15,7 +21,19 @@ class LocationFix {
     required this.source,
     required this.uncertaintyM,
     required this.timeMs,
-  });
+    int? generatedAtMs,
+  }) : generatedAtMs = generatedAtMs ?? timeMs;
+
+  /// Seconds since the position was last confirmed by GPS (0 for a live fix).
+  int get ageSinceGpsS => ((generatedAtMs - timeMs) / 1000).round().clamp(0, 1 << 30);
+}
+
+/// "just now", "45 s", "3 min", "2 h" style age for SMS and screens.
+String formatAge(int seconds) {
+  if (seconds < 10) return 'just now';
+  if (seconds < 60) return '$seconds s ago';
+  if (seconds < 3600) return '${seconds ~/ 60} min ago';
+  return '${seconds ~/ 3600} h ago';
 }
 
 /// Rising-edge peak detector on the linear-acceleration magnitude (m/s^2).
@@ -90,6 +108,7 @@ class PdrEngine {
   int? _lastGpsMs;
   double? _heading;
   double _distanceSinceFix = 0;
+  double _extraUncertaintyM = 0;
   int _steps = 0;
 
   PdrEngine({
@@ -112,20 +131,28 @@ class PdrEngine {
     _gpsAccuracy = accuracyM;
     _lastGpsMs = tMs;
     _distanceSinceFix = 0;
+    _extraUncertaintyM = 0;
   }
 
   void onHeading(double degrees) => _heading = degrees;
 
-  /// Advances the estimate by one stride. Ignored until an anchor and a
-  /// heading exist (we never guess a direction).
+  /// Counts one stride. Distance and steps accrue whenever there is an anchor
+  /// so uncertainty keeps growing; only the position update needs a heading
+  /// (we never guess a direction). A step with no heading adds 50% of its
+  /// distance as extra uncertainty because the true direction is unknown.
   void onStep() {
-    if (_lat == null || _heading == null) return;
-    final h = _heading! * pi / 180;
+    if (_lat == null) return;
+    _distanceSinceFix += strideM;
+    _steps++;
+    final heading = _heading;
+    if (heading == null) {
+      _extraUncertaintyM += 0.5 * strideM;
+      return;
+    }
+    final h = heading * pi / 180;
     const metersPerDegLat = 111111.0;
     _lat = _lat! + strideM * cos(h) / metersPerDegLat;
     _lng = _lng! + strideM * sin(h) / (metersPerDegLat * cos(_lat! * pi / 180));
-    _distanceSinceFix += strideM;
-    _steps++;
   }
 
   LocationFix? currentFix(int nowMs) {
@@ -137,14 +164,18 @@ class PdrEngine {
         source: 'gps',
         uncertaintyM: _gpsAccuracy,
         timeMs: _lastGpsMs!,
+        generatedAtMs: nowMs,
       );
     }
     return LocationFix(
       lat: _lat!,
       lng: _lng!,
       source: 'estimated',
-      uncertaintyM: _gpsAccuracy + driftFraction * _distanceSinceFix,
-      timeMs: nowMs,
+      uncertaintyM: _gpsAccuracy +
+          driftFraction * _distanceSinceFix +
+          _extraUncertaintyM,
+      timeMs: _lastGpsMs!,
+      generatedAtMs: nowMs,
     );
   }
 }

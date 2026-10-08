@@ -160,7 +160,8 @@ void main() {
       expect(e.distanceSinceFixM, 0);
     });
 
-    test('steps without a heading do not move the estimate', () {
+    test('steps without a heading count distance but do not move the estimate',
+        () {
       final e = PdrEngine();
       e.onGpsFix(28.0, 77.0, 5, 0);
       for (int i = 0; i < 20; i++) {
@@ -168,7 +169,22 @@ void main() {
       }
       final f = e.currentFix(60000)!;
       expect(f.lat, 28.0);
-      expect(e.steps, 0);
+      expect(e.steps, 20);
+      expect(e.distanceSinceFixM, closeTo(15, 1e-9));
+      // 5 + 0.15*15 drift + 0.5*15 extra
+      expect(f.uncertaintyM, closeTo(5 + 2.25 + 7.5, 1e-9));
+    });
+
+    test('estimated fix keeps the last GPS time and reports its age', () {
+      final e = PdrEngine();
+      e.onGpsFix(28.0, 77.0, 5, 1000);
+      final f = e.currentFix(91000)!;
+      expect(f.source, 'estimated');
+      expect(f.timeMs, 1000);
+      expect(f.generatedAtMs, 91000);
+      expect(f.ageSinceGpsS, 90);
+      expect(formatAge(f.ageSinceGpsS), '1 min ago');
+      expect(e.currentFix(2000)!.ageSinceGpsS, 1);
     });
   });
 }

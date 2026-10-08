@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:easy_help/logic/relay_policy.dart';
 import 'package:easy_help/logic/sos_packet.dart';
+import 'package:easy_help/services/relay_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 const now = 1700000000000;
@@ -26,6 +27,7 @@ SosPacket packet({
     );
 
 void main() {
+  relayPartATests();
   group('SosPacket', () {
     test('json round trip', () {
       final p = packet(hop: 2);
@@ -168,6 +170,31 @@ void main() {
         forward: (p) async {},
       );
       expect(await bad.handle(packet()), RelayOutcome.queued);
+    });
+  });
+}
+
+void relayPartATests() {
+  group('Part A relay', () {
+    test('packets are offered for 30 minutes', () {
+      expect(RelayService.offerWindow, const Duration(minutes: 30));
+    });
+
+    test('own packet marked as seen is never re-processed or forwarded',
+        () async {
+      var uploads = 0, forwards = 0;
+      final h = RelayHandler(
+        nowMs: () => now,
+        upload: (p) async {
+          uploads++;
+          return false;
+        },
+        forward: (p) async => forwards++,
+      );
+      h.seen.markIfNew('mine');
+      expect(await h.handle(packet(id: 'mine')), RelayOutcome.duplicate);
+      expect(uploads, 0);
+      expect(forwards, 0);
     });
   });
 }

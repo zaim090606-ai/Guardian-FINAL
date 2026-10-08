@@ -16,6 +16,7 @@ import '../logic/sos_packet.dart';
 import 'ai_service.dart';
 import 'audio_recorder_service.dart';
 import 'pdr_services.dart';
+import 'mesh_receiver_service.dart';
 import 'relay_service.dart';
 
 /// Turns a trigger (impact, voice, sound, button) into an SOS.
@@ -66,6 +67,7 @@ class EmergencyService {
       final lng = fix?.lng ?? 0.0;
       final source = fix?.source ?? 'unknown';
       final uncertainty = fix?.uncertaintyM ?? 0.0;
+      final fixAgeS = fix?.ageSinceGpsS;
 
       final contacts = await _loadContacts();
       final micGranted = await Permission.microphone.isGranted;
@@ -78,6 +80,7 @@ class EmergencyService {
         uncertaintyM: uncertainty,
         trigger: level,
         simulated: PdrService().simulateGpsLoss,
+        fixAgeS: fixAgeS,
       );
 
       final packet = SosPacket(
@@ -104,6 +107,8 @@ class EmergencyService {
         'locationSource': source,
         'locationUncertaintyM': uncertainty,
         'isDeadReckoning': source == 'estimated',
+        'locationFixTimeMs': fix?.timeMs,
+        'locationAgeS': fixAgeS,
         'locationSimulated': PdrService().simulateGpsLoss,
         'status': 'triggered',
         'audioStatus': micGranted ? 'processing' : 'unavailable',
@@ -116,7 +121,11 @@ class EmergencyService {
         sosId: docId,
         cloud: () => _uploadAlert(docRef, docData),
         sms: () => _sendSms(text, contacts),
-        mesh: () => RelayService().broadcast(packet),
+        mesh: () {
+          // Our own packet must never be processed again if it bounces back.
+          MeshReceiverService().markOwnPacket(packet.id);
+          return RelayService().broadcast(packet);
+        },
       );
       dispatched = attempts.any((a) => a.ok);
       debugPrint('[GUARDIAN_LOG] SOS $docId result: '
@@ -265,6 +274,8 @@ class EmergencyService {
         'locationSource': fix.source,
         'locationUncertaintyM': fix.uncertaintyM,
         'isDeadReckoning': fix.source == 'estimated',
+        'locationFixTimeMs': fix.timeMs,
+        'locationAgeS': fix.ageSinceGpsS,
         'locationSimulated': PdrService().simulateGpsLoss,
         'lastLiveUpdate': FieldValue.serverTimestamp(),
       }));
@@ -278,7 +289,8 @@ class EmergencyService {
     _liveTimer = null;
     _liveStop = null;
     _activeDoc = null;
-    debugPrint('Live tracking stopped.');
+    await RelayService().stopRelay();
+    debugPrint('Live tracking and mesh relay stopped.');
   }
 
   // ---------------------------------------------------------------- evidence

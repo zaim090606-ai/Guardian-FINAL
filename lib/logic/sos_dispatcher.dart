@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'pdr_engine.dart' show formatAge;
 
 /// Outcome of one send attempt on one channel.
 class SosAttempt {
@@ -189,6 +190,7 @@ String buildSosText({
   required String trigger,
   String summary = '',
   bool simulated = false,
+  int? fixAgeS,
 }) {
   final hasLocation = !(lat == 0 && lng == 0) && source != 'unknown';
   final String where;
@@ -202,7 +204,10 @@ String buildSosText({
       default:
         label = 'GPS';
     }
-    where = '${buildMapsUrl(lat, lng)} ($label +/-${uncertaintyM.round()}m)';
+    final age = source == 'estimated' && fixAgeS != null
+        ? ', last GPS fix ${formatAge(fixAgeS)}'
+        : '';
+    where = '${buildMapsUrl(lat, lng)} ($label +/-${uncertaintyM.round()}m$age)';
   } else {
     where = 'unavailable (no location fix yet)';
   }

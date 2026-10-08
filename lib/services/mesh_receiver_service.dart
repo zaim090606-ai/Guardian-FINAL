@@ -44,6 +44,9 @@ class MeshReceiverService {
   bool _isDiscovering = false;
 
   bool get isDiscovering => _isDiscovering;
+  /// Marks a packet this device created as seen so it is never re-handled.
+  void markOwnPacket(String id) => _handler.seen.markIfNew(id);
+
   int get pendingCount => _handler.queue.length;
 
   /// Starts listening for peers. Safe to call repeatedly; does nothing (and
