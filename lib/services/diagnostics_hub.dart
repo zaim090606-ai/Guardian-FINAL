@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 
+import '../logic/anchor_beacon.dart';
 import '../logic/countdown.dart';
+import 'pdr_services.dart';
 
 /// Live counters for the Diagnostics screen. The relay and audio engines run
 /// in the foreground-service isolate, which publishes a snapshot every two
@@ -44,6 +47,15 @@ class DiagnosticsHub {
   int lastDetectionMs = 0;
 
   Timer? _timer;
+  ServiceInstance? _service;
+
+  /// Service isolate: tell the UI isolate's PDR about a beacon too, so an SOS
+  /// raised from the UI side also benefits from it.
+  void forwardAnchor(AnchorBeacon b) {
+    try {
+      _service?.invoke('anchor', b.toJson());
+    } catch (_) {}
+  }
 
   void relayEvent(String text) =>
       relayEvents.add(text, DateTime.now().millisecondsSinceEpoch);
@@ -67,6 +79,7 @@ class DiagnosticsHub {
 
   /// Service isolate: push snapshots to the UI.
   void startPublishing(ServiceInstance service) {
+    _service = service;
     _timer?.cancel();
     _timer = Timer.periodic(const Duration(seconds: 2), (_) {
       try {
@@ -78,6 +91,11 @@ class DiagnosticsHub {
   /// UI isolate: listen for snapshots.
   static void listen() {
     try {
+      FlutterBackgroundService().on('anchor').listen((event) {
+        if (event == null) return;
+        final b = parseBeacon(jsonEncode(event), DateTime.now().millisecondsSinceEpoch);
+        if (b != null) PdrService().onAnchor(b);
+      });
       FlutterBackgroundService().on('diag').listen((event) {
         if (event != null) remote.value = Map<String, dynamic>.from(event);
       });

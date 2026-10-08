@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../logic/relay_policy.dart';
 import '../logic/sos_packet.dart';
 import 'diagnostics_hub.dart';
+import 'pdr_services.dart';
 import 'relay_service.dart';
 
 /// Receiver side of the mesh. Discovers Guardian devices that are advertising
@@ -110,6 +111,7 @@ class MeshReceiverService {
         onConnectionResult: (String id, Status status) {
           if (status == Status.CONNECTED) {
             DiagnosticsHub.instance.connectedPeers++;
+            _sendBeacon(id);
           } else {
             _requested.remove(endpointId);
           }
@@ -123,6 +125,23 @@ class MeshReceiverService {
     } catch (e) {
       _requested.remove(endpointId);
       debugPrint('Mesh receiver connect failed: $e');
+    }
+  }
+
+  /// Replies to an SOS sender with this phone's position, but only when it has
+  /// a real, accurate, fresh GPS fix and is not simulating GPS loss.
+  void _sendBeacon(String endpointId) {
+    try {
+      final b = PdrService().beaconForSharing();
+      if (b == null) {
+        DiagnosticsHub.instance.relayEvent('No anchor beacon offered (no good GPS fix)');
+        return;
+      }
+      Nearby().sendBytesPayload(
+          endpointId, Uint8List.fromList(utf8.encode(jsonEncode(b.toJson()))));
+      DiagnosticsHub.instance.relayEvent('Offered an anchor beacon to the sender');
+    } catch (e) {
+      debugPrint('Mesh receiver beacon failed: $e');
     }
   }
 

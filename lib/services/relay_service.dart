@@ -6,8 +6,10 @@ import 'package:flutter/foundation.dart';
 import 'package:nearby_connections/nearby_connections.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../logic/anchor_beacon.dart';
 import '../logic/sos_packet.dart';
 import 'diagnostics_hub.dart';
+import 'pdr_services.dart';
 
 /// Sender side of the offline mesh: advertises over Nearby Connections and
 /// hands the SOS packet to every Guardian device that connects.
@@ -67,7 +69,8 @@ class RelayService {
           try {
             await Nearby().acceptConnection(
               id,
-              onPayLoadRecieved: (String endpointId, Payload payload) {},
+              onPayLoadRecieved: (String endpointId, Payload payload) =>
+                  _onPayload(payload),
               onPayloadTransferUpdate:
                   (String endpointId, PayloadTransferUpdate update) {},
             );
@@ -100,6 +103,26 @@ class RelayService {
       debugPrint('Mesh relay error: $e');
       _advertising = false;
       return false;
+    }
+  }
+
+  /// Beacons from helper phones are accepted only while an SOS of ours is
+  /// being offered, and only after validation.
+  void _onPayload(Payload payload) {
+    final bytes = payload.bytes;
+    if (payload.type != PayloadType.BYTES || bytes == null) return;
+    if (_active.isEmpty) return;
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final b = parseBeacon(utf8.decode(bytes), now);
+      if (b == null) return;
+      final e = PdrService().onAnchor(b);
+      DiagnosticsHub.instance.forwardAnchor(b);
+      DiagnosticsHub.instance.relayEvent(e == null
+          ? 'Anchor beacon received (not used: GPS fresh or expired)'
+          : 'Anchor beacon used: radius ${e.radiusBeforeM.round()} -> ${e.radiusAfterM.round()} m');
+    } catch (e) {
+      debugPrint('Mesh relay beacon handling failed: $e');
     }
   }
 

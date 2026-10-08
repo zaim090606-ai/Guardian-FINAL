@@ -6,6 +6,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
+import '../logic/anchor_beacon.dart';
 import '../logic/motion_context.dart';
 import '../logic/pdr_config.dart';
 import '../logic/pdr_engine.dart';
@@ -64,10 +65,40 @@ class PdrService {
         now, _lastStepMs == 0 ? null : _lastStepMs);
   }
 
+  /// Helper side: a beacon for a nearby SOS sender, or null unless this phone
+  /// has a real GPS fix (accuracy <= 30 m, under 20 s old) and is not
+  /// simulating GPS loss. Carries no identity.
+  AnchorBeacon? beaconForSharing() {
+    final age = lastGpsAgeMs;
+    final acc = _lastGpsAccuracy;
+    if (age == null || acc == null || _lastRealLat == null) return null;
+    if (!canOfferBeacon(
+        hasRealFix: true,
+        accuracyM: acc,
+        simulatingGpsLoss: simulateGpsLoss,
+        fixAgeMs: age)) {
+      return null;
+    }
+    return AnchorBeacon(
+      lat: _lastRealLat!,
+      lng: _lastRealLng!,
+      accuracyM: acc,
+      timestampMs: _lastRealGpsMs!,
+    );
+  }
+
+  /// Sender side: a beacon from a nearby phone. [simulated] marks test
+  /// beacons created from the Diagnostics screen.
+  AnchorEvent? onAnchor(AnchorBeacon b, {bool simulated = false}) =>
+      _engine.onAnchor(b, _now(), simulated: simulated);
+
+  AnchorEvent? get lastAnchor => _engine.lastAnchor;
+
   int get steps => _engine.steps;
   PdrEngine get engine => _engine;
   double? get heading => _heading;
   int? _lastRealGpsMs;
+  double? _lastRealLat, _lastRealLng;
   double? _lastGpsAccuracy;
   int? get lastGpsAgeMs =>
       _lastRealGpsMs == null ? null : _now() - _lastRealGpsMs!;
@@ -169,6 +200,8 @@ class PdrService {
     _rememberLastKnown(p);
     _lastRealGpsMs = p.timestamp.millisecondsSinceEpoch;
     _lastGpsAccuracy = p.accuracy;
+    _lastRealLat = p.latitude;
+    _lastRealLng = p.longitude;
     _engine.onGpsFix(
       p.latitude,
       p.longitude,

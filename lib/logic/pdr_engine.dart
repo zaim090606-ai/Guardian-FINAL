@@ -1,5 +1,7 @@
 import 'dart:math';
 
+import 'anchor_beacon.dart';
+import 'anchor_fusion.dart';
 import 'motion_context.dart';
 import 'pdr_config.dart';
 
@@ -21,6 +23,13 @@ class LocationFix {
   /// Motion context name (e.g. 'vehicle'), or '' when unknown.
   final String context;
 
+  /// True when a nearby phone's position corrected this estimate.
+  final bool anchorUsed;
+  final int? anchorAgeS;
+
+  /// Radius right after the anchor was applied.
+  final double? anchorRadiusM;
+
   const LocationFix({
     required this.lat,
     required this.lng,
@@ -29,6 +38,9 @@ class LocationFix {
     required this.timeMs,
     int? generatedAtMs,
     this.context = '',
+    this.anchorUsed = false,
+    this.anchorAgeS,
+    this.anchorRadiusM,
   }) : generatedAtMs = generatedAtMs ?? timeMs;
 
   /// Seconds since the position was last confirmed by GPS (0 for a live fix).
@@ -97,6 +109,24 @@ double smoothHeading(double? previous, double next, {double alpha = 0.2}) {
   if (previous == null) return next;
   final diff = ((next - previous + 540) % 360) - 180;
   return (previous + alpha * diff + 360) % 360;
+}
+
+/// What the last anchor did, for diagnostics.
+class AnchorEvent {
+  final int atMs;
+  final int anchorAgeS;
+  final double radiusBeforeM;
+  final double radiusAfterM;
+  final bool snapped;
+  final bool simulated;
+  const AnchorEvent({
+    required this.atMs,
+    required this.anchorAgeS,
+    required this.radiusBeforeM,
+    required this.radiusAfterM,
+    required this.snapped,
+    this.simulated = false,
+  });
 }
 
 /// Plausible Earth-field strength in microtesla. Outside this range the
@@ -181,6 +211,9 @@ class PdrEngine {
   double _vehicleBankedM = 0;
   int _vehicleSinceMs = 0;
 
+  AnchorEvent? _lastAnchor;
+  AnchorBeacon? _anchorBeacon;
+
   // Learned from GPS.
   double _stride;
   int _strideSamples = 0;
@@ -215,6 +248,49 @@ class PdrEngine {
   /// Context in effect (unknown when the microphone flag is off).
   MotionContext get context =>
       config.microphoneContext ? _context : MotionContext.unknown;
+  AnchorEvent? get lastAnchor => _lastAnchor;
+
+  /// Current radius if the estimate were reported at [nowMs].
+  double uncertaintyAt(int nowMs) =>
+      _baseUncertaintyM + _driftM + _extraUncertaintyM + _vehicleGrowthM(nowMs);
+
+  /// Corrects a stale estimate with a nearby phone's GPS position. Returns the
+  /// event, or null when the beacon was not used (flag off, invalid, expired,
+  /// no estimate yet, or our own GPS is fresh).
+  AnchorEvent? onAnchor(AnchorBeacon b, int nowMs, {bool simulated = false}) {
+    if (!config.anchors || _lat == null || _lastGpsMs == null) return null;
+    if (b.validate(nowMs: nowMs) != null) return null;
+    final ageMs = max(0, nowMs - b.timestampMs);
+    if (ageMs > anchorMaxAgeMs) return null;
+    if (nowMs - _lastGpsMs! <= staleAfterMs) return null;
+    final before = uncertaintyAt(nowMs);
+    final r = fuseAnchor(
+      estLat: _lat!,
+      estLng: _lng!,
+      estSigmaM: before,
+      anchorLat: b.lat,
+      anchorLng: b.lng,
+      anchorAccuracyM: b.accuracyM,
+    );
+    _lat = r.lat;
+    _lng = r.lng;
+    _baseUncertaintyM = r.sigmaM;
+    _distanceSinceFix = 0;
+    _driftM = 0;
+    _extraUncertaintyM = 0;
+    _vehicleBankedM = 0;
+    _vehicleSinceMs = nowMs;
+    _anchorBeacon = b;
+    return _lastAnchor = AnchorEvent(
+      atMs: nowMs,
+      anchorAgeS: (ageMs / 1000).round(),
+      radiusBeforeM: before,
+      radiusAfterM: r.sigmaM,
+      snapped: r.snapped,
+      simulated: simulated,
+    );
+  }
+
   bool get inVehicle => context == MotionContext.vehicle;
 
   /// Feeds the microphone-derived context. While vehicle, steps are ignored
@@ -276,6 +352,7 @@ class PdrEngine {
     _extraUncertaintyM = 0;
     _vehicleBankedM = 0;
     _vehicleSinceMs = tMs;
+    _anchorBeacon = null;
   }
 
   void _learn(double lat, double lng, double acc, int tMs, double? speed,
@@ -422,13 +499,15 @@ class PdrEngine {
       lat: _lat!,
       lng: _lng!,
       source: 'estimated',
-      uncertaintyM: _baseUncertaintyM +
-          _driftM +
-          _extraUncertaintyM +
-          _vehicleGrowthM(nowMs),
+      uncertaintyM: uncertaintyAt(nowMs),
       timeMs: _lastGpsMs!,
       generatedAtMs: nowMs,
       context: _contextName,
+      anchorUsed: _anchorBeacon != null,
+      anchorAgeS: _anchorBeacon == null
+          ? null
+          : (max(0, nowMs - _anchorBeacon!.timestampMs) / 1000).round(),
+      anchorRadiusM: _anchorBeacon == null ? null : _lastAnchor?.radiusAfterM,
     );
   }
 }
