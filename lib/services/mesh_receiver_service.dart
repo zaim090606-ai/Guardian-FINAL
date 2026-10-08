@@ -1,155 +1,255 @@
+import 'dart:async';
 import 'dart:convert';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/foundation.dart';
-import 'package:nearby_connections/nearby_connections.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:permission_handler/permission_handler.dart'; // Required for permissions
 
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:nearby_connections/nearby_connections.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../logic/relay_policy.dart';
+import '../logic/sos_packet.dart';
+import 'relay_service.dart';
+
+/// Receiver side of the mesh. Discovers Guardian devices that are advertising
+/// an SOS, validates and de-duplicates what they send, uploads it to
+/// Firestore when this device has internet, otherwise queues it (persisted)
+/// and offers it to further peers until the hop limit is reached.
 class MeshReceiverService {
   static final MeshReceiverService _instance = MeshReceiverService._internal();
   factory MeshReceiverService() => _instance;
-  
-  final FlutterLocalNotificationsPlugin _notificationsPlugin =
+  MeshReceiverService._internal();
+
+  static const String _queueKey = 'mesh_pending_queue';
+  static const int maxHops = 5;
+
+  final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
+  bool _notificationsReady = false;
 
-  MeshReceiverService._internal() {
-    // FIX 6: Initialize notifications so .show() doesn't crash
-    _initNotifications(); 
-  }
+  late final RelayHandler _handler = RelayHandler(
+    maxHops: maxHops,
+    nowMs: () => DateTime.now().millisecondsSinceEpoch,
+    upload: _uploadToFirestore,
+    forward: (p) async {
+      await RelayService().broadcast(p);
+    },
+  );
 
-  static const String _serviceId = "com.guardian.emergency.relay";
-  static const Strategy _strategy = Strategy.P2P_CLUSTER;
+  final Set<String> _requested = {};
+  StreamSubscription<List<ConnectivityResult>>? _connSub;
+  Timer? _retryTimer;
   bool _isDiscovering = false;
 
-  final Set<String> _processedAlerts = {};
+  bool get isDiscovering => _isDiscovering;
+  int get pendingCount => _handler.queue.length;
 
-  Future<void> _initNotifications() async {
-    const AndroidInitializationSettings initSettingsAndroid =
-        AndroidInitializationSettings('@mipmap/ic_launcher');
-    const InitializationSettings initSettings =
-        InitializationSettings(android: initSettingsAndroid);
-    await _notificationsPlugin.initialize(settings: initSettings);
-  }
-
+  /// Starts listening for peers. Safe to call repeatedly; does nothing (and
+  /// never throws) when permissions are missing.
   Future<void> startEmergencyListener() async {
     if (_isDiscovering) return;
-
     try {
-      // FIX 3: Replaced the removed Nearby() permission methods with permission_handler
-      bool locationGranted = await Permission.location.isGranted;
-      bool bluetoothGranted = await Permission.bluetooth.isGranted;
+      await _initNotifications();
+      await _restoreQueue();
+      _startRetryLoop();
 
-      if (!locationGranted || !bluetoothGranted) {
-        debugPrint("⚠️ Bluetooth/Location permissions not granted.");
+      if (!await RelayService.hasMeshPermissions()) {
+        debugPrint('Mesh receiver: Bluetooth/Location permission missing.');
         return;
       }
 
       _isDiscovering = await Nearby().startDiscovery(
-        "GUARDIAN_RELAY_NODE",
-        _strategy,
-        // FIX 4: Corrected parameter order (endpointName before serviceId)
-        onEndpointFound: (String endpointId, String endpointName, String serviceId) async {
-          debugPrint("📡 Node Discovered: $endpointName ($endpointId)");
+        'GUARDIAN_RELAY_NODE',
+        RelayService.strategy,
+        onEndpointFound:
+            (String endpointId, String endpointName, String serviceId) {
+          _connectTo(endpointId);
+        },
+        onEndpointLost: (String? endpointId) {
+          if (endpointId != null) _requested.remove(endpointId);
+        },
+        serviceId: RelayService.serviceId,
+      );
+      debugPrint('Mesh receiver discovering: $_isDiscovering');
+    } catch (e) {
+      _isDiscovering = false;
+      debugPrint('Mesh receiver failed to start: $e');
+    }
+  }
 
-          await Nearby().requestConnection(
-            "GUARDIAN_RELAY_NODE",
-            endpointId,
-            onConnectionInitiated: (String id, ConnectionInfo info) async {
-              await Nearby().acceptConnection(
-                id,
-                // FIX 1: Spelled exactly how it is misspelled in the plugin source
-                onPayLoadRecieved: (String endpointId, Payload payload) {
-                  if (payload.type == PayloadType.BYTES && payload.bytes != null) {
-                    _processIncomingPayload(payload.bytes!);
-                  }
-                },
-                // FIX 2: Added the now-required transfer update callback
-                onPayloadTransferUpdate: (String endpointId, PayloadTransferUpdate update) {
-                  // Leave empty if you don't need transfer progress bars
-                },
-              );
+  Future<void> _connectTo(String endpointId) async {
+    if (!_requested.add(endpointId)) return;
+    try {
+      await Nearby().requestConnection(
+        'GUARDIAN_RELAY_NODE',
+        endpointId,
+        onConnectionInitiated: (String id, ConnectionInfo info) async {
+          await Nearby().acceptConnection(
+            id,
+            onPayLoadRecieved: (String from, Payload payload) {
+              final bytes = payload.bytes;
+              if (payload.type == PayloadType.BYTES && bytes != null) {
+                _onPayload(bytes);
+              }
             },
-            onConnectionResult: (String id, Status status) {
-              debugPrint("🔗 Mesh Status for $id:$status");
-            },
-            onDisconnected: (String id) {
-              debugPrint("🔌 Disconnected from SOS Node $id");
-            },
+            onPayloadTransferUpdate:
+                (String from, PayloadTransferUpdate update) {},
           );
         },
-        // FIX 5: Removed the `?` making it a non-nullable String
-        onEndpointLost: (String? endpointId) {
-  debugPrint("📡 Lost contact with node $endpointId");
-},
-        serviceId: _serviceId,
+        onConnectionResult: (String id, Status status) {
+          if (status != Status.CONNECTED) _requested.remove(endpointId);
+        },
+        onDisconnected: (String id) {
+          _requested.remove(endpointId);
+        },
       );
     } catch (e) {
-      debugPrint("❌ Error: $e");
+      _requested.remove(endpointId);
+      debugPrint('Mesh receiver connect failed: $e');
     }
   }
 
-  Future<void> _processIncomingPayload(List<int> bytes) async {
+  Future<void> _onPayload(List<int> bytes) async {
     try {
-      String jsonString = utf8.decode(bytes);
-      // Added `as Map<String, dynamic>` to prevent Dart 3 strict-type casting errors
-      Map<String, dynamic> data = jsonDecode(jsonString) as Map<String, dynamic>;
-
-      String alertId = data['alertId'] ?? '';
-      double lat = (data['lat'] as num?)?.toDouble() ?? 0.0;
-      double lng = (data['lng'] as num?)?.toDouble() ?? 0.0;
-      String message = data['message'] ?? '';
-      int timestamp = data['timestamp'] ?? DateTime.now().millisecondsSinceEpoch;
-
-      if (alertId.isNotEmpty && _processedAlerts.contains(alertId)) {
-        return; // Skip duplicate
+      final outcome = await _handler.handleRaw(utf8.decode(bytes));
+      debugPrint('Mesh payload outcome: $outcome');
+      if (outcome == RelayOutcome.uploaded || outcome == RelayOutcome.queued) {
+        await _persistQueue();
+        await _notify(outcome == RelayOutcome.uploaded);
       }
-      if (alertId.isNotEmpty) {
-        _processedAlerts.add(alertId);
-      }
-
-      await FirebaseFirestore.instance
-          .collection('emergency_logs')
-          .doc(alertId)
-          .set({
-        'relayedByMesh': true,
-        'relayedAt': FieldValue.serverTimestamp(),
-        'originTimestamp': Timestamp.fromMillisecondsSinceEpoch(timestamp),
-        'latitude': lat,
-        'longitude': lng,
-        'alertMessage': message,
-        'status': 'mesh_relayed',
-      }, SetOptions(merge: true));
-
-      await _showRelayNotification(alertId);
     } catch (e) {
-      debugPrint("❌ Failed to process payload: $e");
+      debugPrint('Mesh payload handling failed: $e');
     }
   }
 
-  Future<void> _showRelayNotification(String alertId) async {
-    const AndroidNotificationDetails androidDetails =
-        AndroidNotificationDetails(
-      'guardian_mesh_alerts',
-      'Mesh Emergency Relays',
-      importance: Importance.high,
-      priority: Priority.high,
-    );
+  /// True only when the packet is confirmed stored in Firestore. Needs
+  /// internet: a transaction cannot complete offline.
+  Future<bool> _uploadToFirestore(SosPacket p) async {
+    final conn = await Connectivity().checkConnectivity();
+    if (conn.contains(ConnectivityResult.none)) return false;
+    try {
+      final ref = FirebaseFirestore.instance.collection('emergency_logs').doc(p.id);
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        final snap = await tx.get(ref);
+        final relayInfo = {
+          'relayedByMesh': true,
+          'relayedAt': FieldValue.serverTimestamp(),
+          'relayHop': p.hop,
+        };
+        if (snap.exists) {
+          // The origin already uploaded this alert; only note the relay.
+          tx.update(ref, relayInfo);
+        } else {
+          tx.set(ref, {
+            ...relayInfo,
+            'latitude': p.lat,
+            'longitude': p.lng,
+            'locationSource': p.source,
+            'locationUncertaintyM': p.uncertaintyM,
+            'isDeadReckoning': p.source == 'estimated',
+            'originTimestamp': Timestamp.fromMillisecondsSinceEpoch(p.timestampMs),
+            'alertMessage': p.message,
+            'status': 'mesh_relayed',
+            'riskLevel': 'HIGH',
+            'eventType': 'mesh_relay',
+          });
+        }
+      }).timeout(const Duration(seconds: 10));
+      return true;
+    } catch (e) {
+      debugPrint('Mesh upload failed (will retry): $e');
+      return false;
+    }
+  }
 
-    const NotificationDetails notificationDetails =
-        NotificationDetails(android: androidDetails);
+  void _startRetryLoop() {
+    _connSub ??= Connectivity().onConnectivityChanged.listen((results) {
+      if (!results.contains(ConnectivityResult.none)) _flush();
+    });
+    _retryTimer ??= Timer.periodic(const Duration(seconds: 60), (_) => _flush());
+  }
 
-    await _notificationsPlugin.show(
-  id: alertId.hashCode,
-  title: 'Emergency Signal Relayed',
-  body: 'Your device successfully captured and relayed a peer SOS beacon.',
-  notificationDetails: notificationDetails,
-);
+  Future<void> _flush() async {
+    if (_handler.queue.length == 0) return;
+    final n = await _handler.flush();
+    if (n > 0) {
+      debugPrint('Mesh queue: uploaded $n queued alert(s).');
+      await _persistQueue();
+    }
+  }
+
+  Future<void> _restoreQueue() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      final restored = PacketQueue.decode(prefs.getString(_queueKey));
+      for (final p in restored.items) {
+        _handler.queue.add(p);
+        _handler.seen.markIfNew(p.id);
+      }
+    } catch (e) {
+      debugPrint('Mesh queue restore failed: $e');
+    }
+  }
+
+  Future<void> _persistQueue() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_queueKey, _handler.queue.encode());
+    } catch (e) {
+      debugPrint('Mesh queue persist failed: $e');
+    }
+  }
+
+  Future<void> _initNotifications() async {
+    if (_notificationsReady) return;
+    try {
+      await _notifications.initialize(
+        settings: const InitializationSettings(
+          android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+        ),
+      );
+      _notificationsReady = true;
+    } catch (e) {
+      debugPrint('Mesh notifications unavailable: $e');
+    }
+  }
+
+  Future<void> _notify(bool uploaded) async {
+    if (!_notificationsReady) return;
+    try {
+      await _notifications.show(
+        id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        title: 'Emergency signal received',
+        body: uploaded
+            ? 'A nearby SOS was relayed to the cloud.'
+            : 'A nearby SOS was stored and will be sent when you are online.',
+        notificationDetails: const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'guardian_mesh_alerts',
+            'Mesh Emergency Relays',
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
+        ),
+      );
+    } catch (e) {
+      debugPrint('Mesh notification failed: $e');
+    }
   }
 
   Future<void> stopListener() async {
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    await _connSub?.cancel();
+    _connSub = null;
     if (_isDiscovering) {
-      await Nearby().stopDiscovery();
+      try {
+        await Nearby().stopDiscovery();
+      } catch (_) {}
       _isDiscovering = false;
     }
+    _requested.clear();
   }
 }

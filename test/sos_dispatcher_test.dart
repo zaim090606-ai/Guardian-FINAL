@@ -168,6 +168,13 @@ void main() {
     });
   });
 
+  group('extractPhone', () {
+    test('reads the number from the stored Name (phone) format', () {
+      expect(extractPhone('Mom 2 (98765 43210)'), '+919876543210');
+      expect(extractPhone('+15551234567'), '+15551234567');
+    });
+  });
+
   group('buildSosText', () {
     test('includes tracking link, coordinates and source', () {
       final t = buildSosText(

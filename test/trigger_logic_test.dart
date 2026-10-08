@@ -18,6 +18,10 @@ void main() {
       expect(matchKeyword('sosa', kws), isNull);
     });
 
+    test('keeps non-latin letters so Devanagari keywords match', () {
+      expect(matchKeyword('कृपया बचाओ!', const ['बचाओ']), 'बचाओ');
+    });
+
     test('empty transcript or keyword list', () {
       expect(matchKeyword('', kws), isNull);
       expect(matchKeyword('help', const []), isNull);

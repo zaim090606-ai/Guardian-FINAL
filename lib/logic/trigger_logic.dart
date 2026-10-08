@@ -5,7 +5,7 @@ import 'dart:typed_data';
 String sanitizeText(String input) {
   return input
       .toLowerCase()
-      .replaceAll(RegExp(r'[^\w\s]'), '')
+      .replaceAll(RegExp(r'[^\p{L}\p{N}_\s]', unicode: true), '')
       .replaceAll(RegExp(r'\s+'), ' ')
       .trim();
 }

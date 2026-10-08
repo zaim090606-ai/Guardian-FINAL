@@ -18,7 +18,11 @@ class GeminiThreatAnalysis {
 }
  
 class AIService {
-  static const String _apiKey = String.fromEnvironment('GEMINI_API_KEY', defaultValue: 'Place your key here'); // Replace with your key
+  static const String _apiKey = String.fromEnvironment('GEMINI_API_KEY', defaultValue: 'Place your key here');
+
+  /// False when no real key was supplied; every Gemini call is then skipped.
+  static bool get isConfigured =>
+      _apiKey.isNotEmpty && _apiKey != 'Place your key here';
  
   /// Synthesizes speech transcript and acoustic label into structured incident context
   static Future<GeminiThreatAnalysis?> analyzeIncidentContext({
@@ -64,19 +68,17 @@ SUMMARY: [1-sentence briefing for first responders]
     }
   }
  
-  /// Generates a quick alert string for contacts/first responders
-  static Future<String> generateAlert({
+  /// Short Gemini-written summary for contacts. Returns null when Gemini is
+  /// not configured, unreachable or returns nothing (the SOS never needs it).
+  static Future<String?> generateAlert({
     required double gForce,
     required double lat,
     required double lng,
     required String audioTranscript,
     required String level,
   }) async {
+    if (!isConfigured) return null;
     try {
-      if (_apiKey.isEmpty || _apiKey == 'Place your key here') {
-        return _buildFallbackMessage(gForce, lat, lng, audioTranscript, level);
-      }
- 
       final model = GenerativeModel(model: 'gemini-1.5-flash', apiKey: _apiKey);
       final prompt = '''
 You are an emergency response AI for a safety app called Guardian.
@@ -85,27 +87,22 @@ Create a concise emergency message for contacts/first responders based on this r
 - Impact Force: ${gForce.toStringAsFixed(1)} m/s²
 - Live Location: https://maps.google.com/?q=$lat,$lng
 - Spoken Audio Transcript: "${audioTranscript.isEmpty ? 'None recorded' : audioTranscript}"
- 
+
 Format requirements:
 - Maximum 2 sentences.
 - Include the location link.
 - Keep it clear, urgent, and factual.
 ''';
- 
+
       final response = await model.generateContent([Content.text(prompt)]);
-      String? aiText = response.text?.trim();
- 
-      if (aiText != null && aiText.isNotEmpty) {
-        debugPrint("🤖 Gemini Context Generated: $aiText");
-        return aiText;
-      }
-      return _buildFallbackMessage(gForce, lat, lng, audioTranscript, level);
+      final aiText = response.text?.trim();
+      if (aiText != null && aiText.isNotEmpty) return aiText;
     } catch (e) {
-      debugPrint("❌ Gemini AI Error: $e. Falling back to default format.");
-      return _buildFallbackMessage(gForce, lat, lng, audioTranscript, level);
+      debugPrint('Gemini alert summary failed: $e');
     }
+    return null;
   }
- 
+
   /// Analyzes the audio recording natively via Gemini (Online) or local AI (Offline)
   static Future<String> analyzeAudioEvidence(String audioFilePath) async {
     final file = File(audioFilePath);
@@ -129,7 +126,6 @@ Format requirements:
   }
  
   static Future<String> _analyzeWithGemini(File audioFile) async {
-    if (_apiKey.isEmpty || _apiKey == 'Place your key here') return "API Key missing.";
  
     final audioBytes = await audioFile.readAsBytes();
     final model = GenerativeModel(model: 'gemini-1.5-flash', apiKey: _apiKey);
@@ -236,24 +232,4 @@ Format requirements:
     }
     return samples;
   }
- 
-  static String _buildFallbackMessage(
-    double gForce,
-    double lat,
-    double lng,
-    String transcript,
-    String level,
-  ) {
-    String mapsLink = (lat != 0.0 && lng != 0.0)
-        ? "https://maps.google.com/?q=$lat,$lng"
-        : "Location Unavailable";
- 
-    String contextStr = transcript.isNotEmpty ? " Spoken Context: '$transcript'" : "";
-    return "SOS! Guardian Alert ($level, Force: ${gForce.toStringAsFixed(1)}).$contextStr Location: $mapsLink";
-  }
 }
- 
-
-
-
-

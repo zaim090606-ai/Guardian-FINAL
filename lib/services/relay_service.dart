@@ -1,90 +1,134 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart';
 import 'package:nearby_connections/nearby_connections.dart';
-import 'package:permission_handler/permission_handler.dart'; // add this import
+import 'package:permission_handler/permission_handler.dart';
 
+import '../logic/sos_packet.dart';
+
+/// Sender side of the offline mesh: advertises over Nearby Connections and
+/// hands the SOS packet to every Guardian device that connects.
 class RelayService {
   static final RelayService _instance = RelayService._internal();
   factory RelayService() => _instance;
   RelayService._internal();
 
-  static const String _serviceId = "com.guardian.emergency.relay";
-  static const Strategy _strategy = Strategy.P2P_CLUSTER;
-  bool _isBroadcasting = false;
+  static const String serviceId = 'com.guardian.emergency.relay';
+  static const Strategy strategy = Strategy.P2P_CLUSTER;
 
-  /// Broadcast SOS packet to all neighboring devices running Guardian
-  Future<bool> broadcastEmergencyPacket({
-    required String alertId,
-    required double lat,
-    required double lng,
-    required String message,
-  }) async {
+  /// How long a packet keeps being offered to new peers.
+  static const Duration offerWindow = Duration(minutes: 5);
+
+  final Map<String, SosPacket> _active = {};
+  final Map<String, Timer> _expiry = {};
+  bool _advertising = false;
+
+  bool get isAdvertising => _advertising;
+
+  /// True when the runtime permissions Nearby Connections needs are granted.
+  /// Does not prompt: the foreground-service isolate has no UI to show dialogs.
+  static Future<bool> hasMeshPermissions() async {
     try {
-      // Check location & bluetooth permissions required for P2P connection
-      bool locationGranted = await Permission.location.isGranted;
-bool bluetoothGranted = await Permission.bluetooth.isGranted;
-
-if (!locationGranted || !bluetoothGranted) {
-  await Permission.location.request();
-  await Permission.bluetooth.request();
-}
-      String userName = "GUARDIAN_NODE_${alertId.substring(0, 5)}";
-      
-      Map<String, dynamic> payloadMap = {
-        'alertId': alertId,
-        'lat': lat,
-        'lng': lng,
-        'message': message,
-        'timestamp': DateTime.now().millisecondsSinceEpoch,
-      };
-
-      String payloadString = jsonEncode(payloadMap);
-
-      // Start Advertising as an Emergency SOS Node
-      bool advertisingStarted = await Nearby().startAdvertising(
-        userName,
-        _strategy,
-        onConnectionInitiated: (String id, ConnectionInfo info) async {
-          // Auto-accept incoming relay connection
-          await Nearby().acceptConnection(
-            id,
-            onPayLoadRecieved: (String endpointId, Payload payload) {
-  debugPrint("📥 Received Mesh Relay response from $endpointId");
-},
-          );
-        },
-        onConnectionResult: (String id, Status status) {
-          if (status == Status.CONNECTED) {
-            // Instantly transmit the emergency payload upon peer discovery
-            Nearby().sendBytesPayload(
-              id,
-              Uint8List.fromList(utf8.encode(payloadString)),
-            );
-            debugPrint("📡 Emergency Payload broadcasted to peer: $id");
-          }
-        },
-        onDisconnected: (String id) {
-          debugPrint("🔌 Disconnected from mesh peer: $id");
-        },
-        serviceId: _serviceId,
-      );
-
-      _isBroadcasting = advertisingStarted;
-      debugPrint("📡 Emergency Mesh Relay Active: $advertisingStarted");
-      return advertisingStarted;
-    } catch (e) {
-      debugPrint("❌ Mesh Relay Error: $e");
+      if (!await Permission.location.isGranted) return false;
+      final modern = await Permission.bluetoothScan.isGranted &&
+          await Permission.bluetoothAdvertise.isGranted &&
+          await Permission.bluetoothConnect.isGranted;
+      return modern || await Permission.bluetooth.isGranted;
+    } catch (_) {
       return false;
     }
   }
 
-  /// Stop advertising when SOS is canceled or network connection is restored
+  /// Starts offering [packet] to nearby peers. Returns true when advertising
+  /// is running (delivery to a peer cannot be confirmed here).
+  Future<bool> broadcast(SosPacket packet) async {
+    try {
+      if (!await hasMeshPermissions()) {
+        debugPrint('Mesh relay: Bluetooth/Location permission missing.');
+        return false;
+      }
+
+      _active[packet.id] = packet;
+      _expiry[packet.id]?.cancel();
+      _expiry[packet.id] = Timer(offerWindow, () => _expire(packet.id));
+
+      if (_advertising) return true;
+
+      final started = await Nearby().startAdvertising(
+        'GUARDIAN_SOS',
+        strategy,
+        onConnectionInitiated: (String id, ConnectionInfo info) async {
+          try {
+            await Nearby().acceptConnection(
+              id,
+              onPayLoadRecieved: (String endpointId, Payload payload) {},
+              onPayloadTransferUpdate:
+                  (String endpointId, PayloadTransferUpdate update) {},
+            );
+          } catch (e) {
+            debugPrint('Mesh relay accept failed: $e');
+          }
+        },
+        onConnectionResult: (String id, Status status) {
+          if (status == Status.CONNECTED) _sendAll(id);
+        },
+        onDisconnected: (String id) {
+          debugPrint('Mesh relay peer disconnected: $id');
+        },
+        serviceId: serviceId,
+      );
+
+      _advertising = started;
+      debugPrint('Mesh relay advertising: $started');
+      return started;
+    } catch (e) {
+      debugPrint('Mesh relay error: $e');
+      _advertising = false;
+      return false;
+    }
+  }
+
+  void _sendAll(String endpointId) {
+    for (final packet in _active.values) {
+      try {
+        Nearby().sendBytesPayload(
+          endpointId,
+          Uint8List.fromList(utf8.encode(jsonEncode(packet.toJson()))),
+        );
+      } catch (e) {
+        debugPrint('Mesh relay send failed: $e');
+      }
+    }
+    // Free the slot for the next peer once the bytes have been handed over.
+    Timer(const Duration(seconds: 5), () {
+      try {
+        Nearby().disconnectFromEndpoint(endpointId);
+      } catch (_) {}
+    });
+  }
+
+  void _expire(String id) {
+    _active.remove(id);
+    _expiry.remove(id)?.cancel();
+    if (_active.isEmpty) stopRelay();
+  }
+
+  /// Stops advertising, e.g. when the SOS is cancelled.
   Future<void> stopRelay() async {
-    if (_isBroadcasting) {
+    for (final t in _expiry.values) {
+      t.cancel();
+    }
+    _expiry.clear();
+    _active.clear();
+    if (!_advertising) return;
+    _advertising = false;
+    try {
       await Nearby().stopAdvertising();
       await Nearby().stopAllEndpoints();
-      _isBroadcasting = false;
-      debugPrint("🛑 Mesh Relay Stopped.");
+    } catch (e) {
+      debugPrint('Mesh relay stop failed: $e');
     }
   }
 }

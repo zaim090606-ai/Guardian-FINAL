@@ -1,26 +1,40 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
+
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../logic/trigger_logic.dart';
 import 'ai_service.dart';
+import 'audio_recorder_service.dart';
 import 'emergency_service.dart';
 import 'local_whisper_service.dart';
 import 'yamnet_service.dart';
 
+/// Always-on offline audio monitor.
+///
+/// The microphone loop only runs in the foreground-service isolate
+/// (`startListening(background: true)`); the UI isolate just mirrors the
+/// transcript and forwards the on/off switch, so two recorders never compete
+/// for the microphone. Sound classes come from YAMNet and spoken keywords
+/// from Whisper. Either engine can be missing (permission, model load
+/// failure, slow device) and the other keeps working.
 class VoiceService {
-  static final AudioRecorder _recorder = AudioRecorder();
+  static AudioRecorder? _recorder;
   static final YamnetService _yamnetService = YamnetService();
+  static final DistressDebouncer _debouncer = DistressDebouncer();
 
   static bool _isListening = false;
-  static bool _isInitialized = false;
+  static bool _enginesReady = false;
   static bool _isTriggered = false;
-  static StreamSubscription<Uint8List>? _audioStreamSub;
+  static bool _uiAttached = false;
+  static int _slowWhisperRuns = 0;
 
   /// Global state toggle for user privacy
   static final ValueNotifier<bool> isEnabledNotifier = ValueNotifier<bool>(true);
@@ -31,10 +45,13 @@ class VoiceService {
   /// Reactive notifier for current active keywords (UI state sync)
   static final ValueNotifier<List<String>> keywordsNotifier = ValueNotifier<List<String>>([]);
 
-  static final List<String> _rollingTranscript = [];
-  static const String _customKeywordsKey = "custom_voice_keywords";
+  /// Set by the service isolate to mirror transcripts to the UI.
+  static void Function(String transcript)? onTranscript;
 
-  /// Default emergency trigger words
+  static final List<String> _rollingTranscript = [];
+  static const String _customKeywordsKey = 'custom_voice_keywords';
+  static const Duration _chunk = Duration(milliseconds: 2500);
+
   static final List<String> _defaultKeywords = [
     'help',
     'sos',
@@ -44,76 +61,99 @@ class VoiceService {
     'call police',
     'bachao',
     'madad',
+    'बचाओ',
+    'मदद',
   ];
 
   static List<String> activeKeywords = [..._defaultKeywords];
-  static Function()? onSosTriggered;
 
-  static String get recentTranscript => _rollingTranscript.join(" ");
+  static String get recentTranscript => _rollingTranscript.join(' ');
 
-  /// Initialize Dual Engine (YAMNet + Whisper) and start background monitoring loop
-  static Future<void> startListening({Function()? onSosTriggeredCallback}) async {
-    if (onSosTriggeredCallback != null) {
-      onSosTriggered = onSosTriggeredCallback;
-    }
-
+  /// UI isolate: loads keywords and mirrors the service's transcript.
+  /// Service isolate (`background: true`): starts the microphone loop.
+  static Future<void> startListening({bool background = false}) async {
     await loadCustomKeywords();
 
+    if (!background) {
+      _attachToService();
+      return;
+    }
+
     if (!isEnabledNotifier.value) {
-      debugPrint("🎙️ Voice monitoring is currently disabled by user.");
+      debugPrint('Voice monitoring is disabled by the user.');
+      return;
+    }
+    if (_isListening) return;
+
+    // The service isolate cannot show a permission dialog, so only check.
+    if (!await Permission.microphone.isGranted) {
+      debugPrint('Microphone permission missing: audio triggers are off.');
       return;
     }
 
-    var status = await Permission.microphone.request();
-    if (!status.isGranted) {
-      debugPrint("❌ Microphone permission denied.");
-      return;
-    }
-
-    if (!_isInitialized) {
+    if (!_enginesReady) {
       await _yamnetService.initialize();
       await LocalWhisperService.initialize();
-      _isInitialized = true;
+      _enginesReady = true;
+    }
+    if (!_yamnetService.isAvailable && !LocalWhisperService.isAvailable) {
+      debugPrint('No audio engine could be loaded: audio triggers are off.');
+      return;
     }
 
-    if (_isInitialized && !_isListening) {
-      _startContinuousChunkLoop();
+    unawaited(_chunkLoop());
+  }
+
+  static void _attachToService() {
+    if (_uiAttached) return;
+    _uiAttached = true;
+    try {
+      FlutterBackgroundService().on('transcript').listen((event) {
+        final text = event?['text'];
+        if (text is String) transcriptNotifier.value = text;
+      });
+    } catch (e) {
+      debugPrint('Could not attach to background service: $e');
     }
   }
 
-  /// Turn voice monitoring ON or OFF
-  static Future<void> toggleVoiceMonitoring(bool enabled) async {
+  /// Turn voice monitoring ON or OFF (from the UI or the service isolate).
+  static Future<void> toggleVoiceMonitoring(bool enabled,
+      {bool fromService = false}) async {
     isEnabledNotifier.value = enabled;
+    if (!fromService) {
+      try {
+        FlutterBackgroundService().invoke('voice_enabled', {'enabled': enabled});
+      } catch (_) {}
+      if (!enabled) transcriptNotifier.value = 'Voice Monitoring Paused';
+      return;
+    }
     if (enabled) {
-      await startListening();
+      await startListening(background: true);
     } else {
       await stopListening();
-      transcriptNotifier.value = "Voice Monitoring Paused";
     }
   }
 
-  /// Load custom keywords from SharedPreferences & notify UI listeners
   static Future<void> loadCustomKeywords() async {
     final prefs = await SharedPreferences.getInstance();
-    List<String>? saved = prefs.getStringList(_customKeywordsKey);
+    await prefs.reload();
+    final saved = prefs.getStringList(_customKeywordsKey);
     activeKeywords = [..._defaultKeywords];
-    if (saved != null && saved.isNotEmpty) {
-      for (String item in saved) {
-        if (!activeKeywords.contains(item)) {
-          activeKeywords.add(item);
-        }
+    if (saved != null) {
+      for (final item in saved) {
+        if (!activeKeywords.contains(item)) activeKeywords.add(item);
       }
     }
     keywordsNotifier.value = List.unmodifiable(activeKeywords);
   }
 
-  /// Save a new custom trigger keyword
   static Future<bool> addCustomKeyword(String word) async {
-    final cleanWord = _sanitizeText(word);
+    final cleanWord = sanitizeText(word);
     if (cleanWord.isEmpty || activeKeywords.contains(cleanWord)) return false;
 
     final prefs = await SharedPreferences.getInstance();
-    List<String> saved = prefs.getStringList(_customKeywordsKey) ?? [];
+    final saved = prefs.getStringList(_customKeywordsKey) ?? [];
     if (!saved.contains(cleanWord)) {
       saved.add(cleanWord);
       await prefs.setStringList(_customKeywordsKey, saved);
@@ -122,13 +162,12 @@ class VoiceService {
     return true;
   }
 
-  /// Remove a custom trigger keyword
   static Future<bool> removeCustomKeyword(String word) async {
-    final cleanWord = _sanitizeText(word);
+    final cleanWord = sanitizeText(word);
     if (_defaultKeywords.contains(cleanWord)) return false;
 
     final prefs = await SharedPreferences.getInstance();
-    List<String> saved = prefs.getStringList(_customKeywordsKey) ?? [];
+    final saved = prefs.getStringList(_customKeywordsKey) ?? [];
     if (saved.contains(cleanWord)) {
       saved.remove(cleanWord);
       await prefs.setStringList(_customKeywordsKey, saved);
@@ -138,200 +177,197 @@ class VoiceService {
     return false;
   }
 
-  /// Clean punctuation and standardize text
-  static String _sanitizeText(String input) {
-    return input
-        .toLowerCase()
-        .replaceAll(RegExp(r'[^\w\s]'), '')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
-  }
-
-  /// Cycle audio snippet recording continuously for local edge inference
-  static void _startContinuousChunkLoop() async {
-    if (!isEnabledNotifier.value || _isListening) return;
-
+  /// Records 2.5 s slices and runs both engines on each one.
+  static Future<void> _chunkLoop() async {
+    if (_isListening) return;
     _isListening = true;
-    debugPrint("🎙️ Dual-Engine Edge Audio Monitor Running...");
+    debugPrint('Audio monitor running '
+        '(YAMNet: ${_yamnetService.isAvailable}, '
+        'Whisper: ${LocalWhisperService.isAvailable}).');
 
+    int failures = 0;
     try {
       final dir = await getTemporaryDirectory();
-      
+      final recorder = _recorder ??= AudioRecorder();
+
       while (_isListening && isEnabledNotifier.value) {
-        if (_isTriggered) {
-          await Future.delayed(const Duration(seconds: 2));
+        // Stay off the microphone while an SOS is being handled or evidence
+        // audio is being recorded.
+        if (_isTriggered || AudioRecorderService.isCapturing) {
+          await Future<void>.delayed(const Duration(seconds: 2));
           continue;
         }
 
-        final audioPath = '${dir.path}/temp_audio_chunk.wav';
-        
-        // Record 2.5 second audio slice at 16kHz mono PCM
-        final hasPermission = await _recorder.hasPermission();
-        if (!hasPermission) break;
+        try {
+          if (!await recorder.hasPermission()) {
+            debugPrint('Microphone permission revoked: stopping monitor.');
+            break;
+          }
+          final audioPath = '${dir.path}/temp_audio_chunk.wav';
+          await recorder.start(
+            const RecordConfig(
+              encoder: AudioEncoder.wav,
+              sampleRate: 16000,
+              numChannels: 1,
+            ),
+            path: audioPath,
+          );
+          await Future<void>.delayed(_chunk);
+          final path = await recorder.stop();
+          failures = 0;
 
-        await _recorder.start(
-          const RecordConfig(
-            encoder: AudioEncoder.wav,
-            sampleRate: 16000,
-            numChannels: 1,
-          ),
-          path: audioPath,
-        );
-
-        await Future.delayed(const Duration(milliseconds: 2500));
-        final path = await _recorder.stop();
-
-        if (path != null && File(path).existsSync()) {
-          await _processAudioChunk(path);
+          if (path != null && File(path).existsSync()) {
+            await _processAudioChunk(path);
+          }
+        } catch (e) {
+          failures++;
+          debugPrint('Audio chunk failed ($failures): $e');
+          try {
+            await recorder.stop();
+          } catch (_) {}
+          if (failures >= 5) {
+            debugPrint('Microphone keeps failing: stopping monitor.');
+            break;
+          }
+          await Future<void>.delayed(Duration(seconds: 2 * failures));
         }
       }
     } catch (e) {
-      debugPrint("⚠️ Audio Loop Error: $e");
+      debugPrint('Audio loop error: $e');
+    } finally {
       _isListening = false;
-      _restartListeningIfNeeded();
     }
   }
 
-  /// Process 2.5s chunk across YAMNet & Whisper engines
   static Future<void> _processAudioChunk(String filePath) async {
     if (_isTriggered || !isEnabledNotifier.value) return;
 
     try {
-      final file = File(filePath);
-      final bytes = await file.readAsBytes();
+      final bytes = await File(filePath).readAsBytes();
+      final samples = _pcm16WavToFloat32(bytes);
 
-      // Convert raw PCM bytes to Float32List for YAMNet
-      Float32List float32Pcm = _convertBytesToFloat32(bytes);
-
-      bool emergencyTriggered = false;
-      String triggerReason = "";
-      String acousticTag = "";
-
-      // --- ENGINE 1: YAMNet Offline Acoustic Shield ---
-      final yamnetResult = await _yamnetService.classifyAudioFrame(float32Pcm);
-      if (yamnetResult != null && yamnetResult.isDistress) {
-        emergencyTriggered = true;
-        acousticTag = yamnetResult.label;
-        triggerReason = "YAMNet Shield: ${yamnetResult.label} (${(yamnetResult.confidence * 100).toStringAsFixed(0)}%)";
-        debugPrint("🚨 $triggerReason");
+      // Quiet room: nothing to classify, and Whisper would only hallucinate.
+      if (isSilent(samples)) {
+        _debouncer.add(false);
+        return;
       }
 
-      // --- ENGINE 2: Local Whisper Offline STT ---
-      String transcript = await LocalWhisperService.transcribe(filePath);
-      String cleanTranscript = _sanitizeText(transcript);
+      bool acousticConfirmed = false;
+      String acousticLabel = '';
+      double acousticScore = 0;
 
-      if (cleanTranscript.isNotEmpty) {
-        _rollingTranscript.add(transcript);
-        if (_rollingTranscript.length > 8) _rollingTranscript.removeAt(0);
-        transcriptNotifier.value = recentTranscript;
-        debugPrint("🎙️ Whisper Offline Transcript: $cleanTranscript");
-      }
-
-      if (!emergencyTriggered && cleanTranscript.isNotEmpty) {
-        for (String keyword in activeKeywords) {
-          String cleanKeyword = _sanitizeText(keyword);
-          if (cleanTranscript.contains(cleanKeyword)) {
-            emergencyTriggered = true;
-            triggerReason = "Whisper Keyword: '$keyword'";
-            debugPrint("🚨 $triggerReason");
-            break;
+      if (_yamnetService.isAvailable) {
+        final results = await _yamnetService.classifySamples(samples);
+        for (final r in results) {
+          if (_debouncer.add(r.isDistress)) {
+            acousticConfirmed = true;
+            acousticLabel = r.distressLabel;
+            acousticScore = r.distressScore;
           }
         }
       }
 
-      // --- INSTANT OFFLINE EMERGENCY DISPATCH ---
-      if (emergencyTriggered && !_isTriggered) {
-        _isTriggered = true;
+      String transcript = '';
+      if (!acousticConfirmed && LocalWhisperService.isAvailable) {
+        final sw = Stopwatch()..start();
+        transcript = await LocalWhisperService.transcribe(filePath);
+        sw.stop();
+        _trackWhisperSpeed(sw.elapsed);
 
-        // SOLUTION 3 FIX: Ensure recorder is stopped and wait 600ms for Android to release physical mic
-        if (await _recorder.isRecording()) {
-          await _recorder.stop();
+        if (sanitizeText(transcript).isNotEmpty) {
+          _rollingTranscript.add(transcript);
+          if (_rollingTranscript.length > 8) _rollingTranscript.removeAt(0);
+          transcriptNotifier.value = recentTranscript;
+          onTranscript?.call(recentTranscript);
         }
-        await Future.delayed(const Duration(milliseconds: 600));
+      }
 
+      final reason = decideTrigger(
+        acousticConfirmed: acousticConfirmed,
+        acousticLabel: acousticLabel,
+        acousticScore: acousticScore,
+        transcript: transcript,
+        keywords: activeKeywords,
+      );
+      if (reason == null) return;
+
+      debugPrint('Audio trigger: $reason');
+      _isTriggered = true;
+      _debouncer.reset();
+      try {
         await EmergencyService.triggerEmergencyDispatch(
           force: 0.0,
-          level: triggerReason,
+          level: reason,
           audioTranscript: transcript,
         );
-
-        onSosTriggered?.call();
-
-        // --- ASYNC HYBRID GEMINI ENRICHMENT (NON-BLOCKING) ---
-        _enrichWithGeminiIfOnline(
+        unawaited(_enrichWithGeminiIfOnline(
           transcript: transcript,
-          acousticLabel: acousticTag,
-        );
-
-        Timer(const Duration(seconds: 10), () {
-          _isTriggered = false;
-        });
+          acousticLabel: acousticLabel,
+        ));
+      } finally {
+        Timer(const Duration(seconds: 10), () => _isTriggered = false);
       }
     } catch (e) {
-      debugPrint("❌ Error processing audio chunk: $e");
+      debugPrint('Error processing audio chunk: $e');
     }
   }
 
-  /// Converts 16-bit PCM WAV byte buffer to Float32 sample vector
-  static Float32List _convertBytesToFloat32(Uint8List bytes) {
-    // Skip 44-byte WAV header if present
-    int offset = bytes.length > 44 ? 44 : 0;
-    int numSamples = (bytes.length - offset) ~/ 2;
-    Float32List samples = Float32List(numSamples);
-
-    ByteData byteData = ByteData.sublistView(bytes, offset);
-    for (int i = 0; i < numSamples; i++) {
-      int sample = byteData.getInt16(i * 2, Endian.little);
-      samples[i] = sample / 32768.0; // Normalize Int16 to [-1.0, 1.0]
+  /// A device that needs far longer than the chunk length to transcribe it
+  /// cannot keep up, so Whisper is switched off and YAMNet carries on alone.
+  static void _trackWhisperSpeed(Duration took) {
+    if (took > const Duration(seconds: 8)) {
+      _slowWhisperRuns++;
+      if (_slowWhisperRuns >= 3) {
+        LocalWhisperService.disable();
+        debugPrint('Whisper too slow on this device: speech keywords off.');
+      }
+    } else {
+      _slowWhisperRuns = 0;
     }
-    return samples;
   }
 
-  /// Sends telemetry to Gemini API asynchronously if internet is present
+  /// Reads 16-bit PCM from a WAV file as floats in [-1, 1].
+  static Float32List _pcm16WavToFloat32(Uint8List bytes) {
+    final offset = bytes.length > 44 ? 44 : 0;
+    final n = (bytes.length - offset) ~/ 2;
+    final out = Float32List(n);
+    final data = ByteData.sublistView(bytes, offset);
+    for (int i = 0; i < n; i++) {
+      out[i] = data.getInt16(i * 2, Endian.little) / 32768.0;
+    }
+    return out;
+  }
+
+  /// Optional online enhancement; the SOS has already been sent.
   static Future<void> _enrichWithGeminiIfOnline({
     required String transcript,
     required String acousticLabel,
   }) async {
     try {
       final connectivity = await Connectivity().checkConnectivity();
-      if (connectivity.contains(ConnectivityResult.none)) {
-        debugPrint("📡 Network unavailable. Skipping Gemini enrichment (Offline dispatch prioritized).");
-        return;
-      }
+      if (connectivity.contains(ConnectivityResult.none)) return;
 
       final analysis = await AIService.analyzeIncidentContext(
         transcript: transcript,
         acousticLabel: acousticLabel,
       );
-
       if (analysis != null) {
-        debugPrint("🧠 Gemini Incident Enrichment: [${analysis.threatLevel}] ${analysis.threatSummary}");
         EmergencyService.updateIncidentContext(analysis.threatSummary);
       }
     } catch (e) {
-      debugPrint("⚠️ Non-blocking Gemini enrichment skipped: $e");
-    }
-  }
-
-  static void _restartListeningIfNeeded() {
-    if (!_isListening && !_isTriggered && isEnabledNotifier.value) {
-      Future.delayed(const Duration(milliseconds: 1000), () {
-        startListening();
-      });
+      debugPrint('Gemini enrichment skipped: $e');
     }
   }
 
   static Future<void> stopListening() async {
     _isListening = false;
-    await _audioStreamSub?.cancel();
-    _audioStreamSub = null;
-    await _recorder.stop();
+    try {
+      await _recorder?.stop();
+    } catch (_) {}
   }
 
   static void clearTranscriptBuffer() {
     _rollingTranscript.clear();
-    if (isEnabledNotifier.value) {
-      transcriptNotifier.value = '';
-    }
+    if (isEnabledNotifier.value) transcriptNotifier.value = '';
   }
 }

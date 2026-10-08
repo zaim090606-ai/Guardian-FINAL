@@ -156,6 +156,12 @@ String normalizePhone(String input) {
   return cleaned;
 }
 
+/// Contacts are stored locally as "Name (phone)"; plain numbers also work.
+String extractPhone(String stored) {
+  final m = RegExp(r'\(([^)]*)\)\s*$').firstMatch(stored);
+  return normalizePhone(m != null ? m.group(1)! : stored);
+}
+
 /// Builds the SMS text. Always carries coordinates so it is useful even when
 /// the tracking page cannot be reached.
 String buildSosText({

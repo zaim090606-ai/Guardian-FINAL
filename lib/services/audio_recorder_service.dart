@@ -105,49 +105,51 @@ class AudioRecorderService {
 
   /// Captures emergency audio for a fixed duration.
   static Future<String?> captureEmergencyAudio({int durationSeconds = 30}) async {
-    final String? path = await startEmergencyAudioRecording();
-    if (path == null) return null;
+    isCapturing = true;
+    try {
+      final String? path = await startEmergencyAudioRecording();
+      if (path == null) return null;
 
-    await Future.delayed(Duration(seconds: durationSeconds));
-    return await stopEmergencyAudioRecording();
+      await Future.delayed(Duration(seconds: durationSeconds));
+      return await stopEmergencyAudioRecording();
+    } finally {
+      isCapturing = false;
+    }
   }
 
-  /// Uploads audio file to Firebase Storage. Preserves local file if offline.
+  /// Uploads the audio file to Firebase Storage and returns its download URL.
+  /// Returns null when the upload fails or times out; the local file is kept
+  /// so the evidence is not lost.
   static Future<String?> uploadAudioToFirebase(String filePath) async {
     final File file = File(filePath);
     if (!await file.exists()) {
-      debugPrint("❌ File does not exist for upload: $filePath");
+      debugPrint('File does not exist for upload: $filePath');
       return null;
     }
 
+    UploadTask? task;
     try {
-      final String userId = FirebaseAuth.instance.currentUser?.uid ?? "anonymous_user";
-      final String fileName = "sos_${DateTime.now().millisecondsSinceEpoch}.wav";
+      final String userId = FirebaseAuth.instance.currentUser?.uid ?? 'anonymous_user';
+      final String fileName = 'sos_${DateTime.now().millisecondsSinceEpoch}.wav';
       final Reference storageRef = FirebaseStorage.instance
           .ref()
           .child('emergency_audio')
           .child(userId)
           .child(fileName);
 
-      debugPrint("☁️ Uploading WAV audio evidence to Firebase Storage...");
-      final UploadTask uploadTask = storageRef.putFile(
-        file,
-        SettableMetadata(contentType: 'audio/wav'),
-      );
-
-      final TaskSnapshot snapshot = await uploadTask;
+      task = storageRef.putFile(file, SettableMetadata(contentType: 'audio/wav'));
+      // Storage does not queue uploads offline, so give up instead of hanging.
+      final TaskSnapshot snapshot = await task.timeout(const Duration(seconds: 45));
       final String downloadUrl = await snapshot.ref.getDownloadURL();
 
-      debugPrint("✅ Audio uploaded successfully! URL: $downloadUrl");
-
-      if (await file.exists()) {
-        await file.delete();
-      }
-
+      if (await file.exists()) await file.delete();
       return downloadUrl;
     } catch (e) {
-      debugPrint("⚠️ Upload failed (offline/network). Retaining file for store-and-forward: $e");
-      return filePath;
+      debugPrint('Audio upload failed, keeping local file: $e');
+      try {
+        await task?.cancel();
+      } catch (_) {}
+      return null;
     }
   }
 
