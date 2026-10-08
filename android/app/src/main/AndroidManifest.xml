@@ -32,6 +32,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
 
     <application
         android:usesCleartextTraffic="true"
@@ -42,7 +43,7 @@
         <!-- Google Maps API Key -->
         <meta-data 
             android:name="com.google.android.geo.API_KEY"
-            android:value="AIzaSyCjuP4ibD4M2oPOYholgrTfY4FciB58Odo"/>
+            android:value="${MAPS_API_KEY}"/>
 
         <!-- Background Service declaration with Android 14+ types -->
         <service
@@ -53,7 +54,20 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Emergency safety shield background monitoring" />
-        </service> 
+        </service>
+
+        <!-- Boot Receiver for Auto-Restart after Device Reboot -->
+        <receiver
+            android:name="id.flutter.flutter_background_service.BootReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+            </intent-filter>
+        </receiver>
 
         <activity
             android:name=".MainActivity"
