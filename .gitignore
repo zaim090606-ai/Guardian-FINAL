@@ -60,3 +60,4 @@ local.properties
 *.jks
 key.properties
 .firebase/
+.kotlin/
