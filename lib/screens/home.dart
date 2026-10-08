@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../services/emergency_service.dart';
 import '../services/voice_service.dart';
+import 'diagnostics_screen.dart';
 
 class Home extends StatefulWidget {
   const Home({super.key});
@@ -37,13 +38,8 @@ class _HomeState extends State<Home> {
   }
 
   void _initVoiceService() {
-    VoiceService.startListening(
-      onSosTriggeredCallback: () {
-        if (mounted) {
-          _triggerSos("Voice Keyword Trigger");
-        }
-      },
-    );
+    // The microphone loop runs in the background service; this mirrors it.
+    VoiceService.startListening();
   }
 
   Future<void> _loadSavedContact() async {
@@ -340,6 +336,15 @@ class _HomeState extends State<Home> {
         backgroundColor: Colors.white,
         elevation: 0,
         centerTitle: true,
+        actions: [
+          IconButton(
+            tooltip: 'Diagnostics',
+            icon: const Icon(Icons.monitor_heart_outlined, color: Colors.black),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const DiagnosticsScreen()),
+            ),
+          ),
+        ],
       ),
       body: SafeArea(
         child: SingleChildScrollView(

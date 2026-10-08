@@ -1,118 +1,108 @@
 import 'dart:async';
 import 'dart:math';
-import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'dart:ui';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sensors_plus/sensors_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:sensors_plus/sensors_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
 import 'firebase_options.dart';
 import 'navbar/navbar.dart';
 import 'screens/firstscreen.dart';
+import 'services/diagnostics_hub.dart';
 import 'services/emergency_service.dart';
-import 'services/voice_service.dart';
 import 'services/mesh_receiver_service.dart';
+import 'services/pdr_services.dart';
+import 'services/relay_service.dart';
+import 'services/sos_countdown_service.dart';
+import 'services/voice_service.dart';
 
-Future<void> testFirebaseConnection() async {
-  debugPrint("🧪 Starting Firebase Connection Test...");
-
-  try {
-    // 1. Check Auth Status
-    User? currentUser = FirebaseAuth.instance.currentUser;
-    debugPrint("👤 Auth Status: ${currentUser != null ? 'Logged in as ${currentUser.uid}' : 'Anonymous / Not logged in'}");
-
-    // 2. Test Firestore Write
-    DocumentReference testDoc = FirebaseFirestore.instance
-        .collection('test_connection')
-        .doc();
-
-    await testDoc.set({
-      'test_time': FieldValue.serverTimestamp(),
-      'status': 'Firebase is connected successfully!',
-      'device_platform': defaultTargetPlatform.toString(),
-    });
-
-    debugPrint("✅ FIRESTORE WRITE SUCCESSFUL! Doc ID: ${testDoc.id}");
-
-    // 3. Test Firestore Read
-    DocumentSnapshot snapshot = await testDoc.get();
-    if (snapshot.exists) {
-      debugPrint("📖 FIRESTORE READ SUCCESSFUL! Data: ${snapshot.data()}");
-    } else {
-      debugPrint("❌ FIRESTORE READ FAILED: Document does not exist.");
-    }
-
-    // 4. Verify tracking link generation structure
-    String testTrackingLink = "https://your-app-website.com/alert/${testDoc.id}";
-    debugPrint("🔗 Generated Test Tracking Link: $testTrackingLink");
-
-  } catch (e) {
-    debugPrint("❌ FIREBASE TEST FAILED With Error: $e");
-  }
-}
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
-  // Initialize Firebase Anonymous Auth to clear Firestore PERMISSION_DENIED
   try {
+    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+    FirebaseFirestore.instance.settings = const Settings(
+      persistenceEnabled: true,
+      cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
+    );
     await FirebaseAuth.instance.signInAnonymously();
-    debugPrint("✅ Firebase Anonymous Auth initialized");
   } catch (e) {
-    debugPrint("⚠️ Firebase Anonymous Auth failed: $e");
+    // The app still works offline (SMS, mesh, local detection) without Firebase.
+    debugPrint('Firebase setup incomplete: $e');
   }
-
-  // Enable Firestore Offline Persistence for Mesh Relay Syncing
-  FirebaseFirestore.instance.settings = const Settings(
-    persistenceEnabled: true,
-    cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
-  );
 
   final prefs = await SharedPreferences.getInstance();
   final bool isSetupComplete = prefs.getBool('is_setup_complete') ?? false;
 
-  // 1. Boot Flutter UI framework first
   runApp(
     ProviderScope(
       child: MyApp(isSetupComplete: isSetupComplete),
     ),
   );
 
-  // 2. Request runtime permissions safely after UI mount
-  final micPermissionGranted = await requestEmergencyPermissions();
-
-  // 3. Configure and start service ONLY after permissions are verified
-  if (micPermissionGranted) {
-    await initializeBackgroundService(enableMicrophone: true);
-    final service = FlutterBackgroundService();
-    final alreadyRunning = await service.isRunning();
-    if (!alreadyRunning) {
-      await service.startService();
-    }
-  } else {
-    debugPrint(
-        "⚠️ Initializing background service without microphone monitoring...");
-    await initializeBackgroundService(enableMicrophone: false);
-    final service = FlutterBackgroundService();
-    final alreadyRunning = await service.isRunning();
-    if (!alreadyRunning) {
-      await service.startService();
-    }
-  }
-
-  // 4. Start listening for incoming Mesh Relay emergency packets
-  await MeshReceiverService().startEmergencyListener();
+  unawaited(_startGuardian());
 }
 
-/// Requests SMS, Phone, Location, Microphone, Notification, and Battery Optimization permissions.
-Future<bool> requestEmergencyPermissions() async {
-  Map<Permission, PermissionStatus> statuses = await [
+/// Runs after the first frame: permissions, background service, and the
+/// UI-side listeners.
+Future<void> _startGuardian() async {
+  try {
+    final granted = await requestEmergencyPermissions();
+    await _initNotifications();
+
+    await initializeBackgroundService(
+      enableMicrophone: granted.microphone,
+      enableLocation: granted.location,
+    );
+    final service = FlutterBackgroundService();
+    if (!await service.isRunning()) await service.startService();
+
+    // UI side: mirror the service state, allow cancelling a countdown, and
+    // run PDR here too so an SOS from the button also has dead reckoning.
+    DiagnosticsHub.listen();
+    SosCountdownService.attachUi(navigatorKey);
+    await VoiceService.startListening();
+    await PdrService().start();
+  } catch (e) {
+    debugPrint('Guardian start-up error: $e');
+  }
+}
+
+Future<void> _initNotifications() async {
+  final plugin = FlutterLocalNotificationsPlugin();
+  await plugin.initialize(
+    settings: const InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+    ),
+    onDidReceiveNotificationResponse: (NotificationResponse r) {
+      if (r.actionId == SosCountdownService.cancelAction) {
+        FlutterBackgroundService().invoke(SosCountdownService.cancelAction);
+      }
+    },
+  );
+}
+
+class GrantedPermissions {
+  final bool microphone;
+  final bool location;
+  const GrantedPermissions({required this.microphone, required this.location});
+}
+
+/// Requests every runtime permission the app can use. Missing ones switch the
+/// matching feature off; nothing here is required for the app to start.
+Future<GrantedPermissions> requestEmergencyPermissions() async {
+  final statuses = await [
     Permission.sms,
     Permission.phone,
     Permission.locationWhenInUse,
@@ -124,77 +114,59 @@ Future<bool> requestEmergencyPermissions() async {
     Permission.nearbyWifiDevices,
   ].request();
 
-  if (statuses[Permission.sms]?.isGranted == true &&
-      statuses[Permission.phone]?.isGranted == true) {
-    debugPrint("✅ Background SMS and Telephony permissions granted!");
-  } else {
-    debugPrint("⚠️ Background SMS/Telephony permission missing.");
-  }
-
-  if (statuses[Permission.locationWhenInUse]?.isGranted == true) {
-    PermissionStatus bgStatus = await Permission.locationAlways.request();
-    if (bgStatus.isGranted) {
-      debugPrint("✅ Background Location granted!");
-    } else {
-      debugPrint("⚠️ Background Location permission denied or restricted.");
-    }
+  final location = statuses[Permission.locationWhenInUse]?.isGranted == true;
+  if (location) {
+    final bg = await Permission.locationAlways.request();
+    if (!bg.isGranted) debugPrint('Background location not granted.');
   }
 
   if (await Permission.ignoreBatteryOptimizations.isDenied) {
-    debugPrint("⚠️ Requesting battery optimization exemption...");
     await Permission.ignoreBatteryOptimizations.request();
-  } else {
-    debugPrint("✅ Battery optimization exempted!");
   }
 
-  final micGranted = statuses[Permission.microphone]?.isGranted == true;
-  if (!micGranted) {
-    debugPrint(
-        "⚠️ Microphone permission missing — voice background trigger disabled.");
+  final mic = statuses[Permission.microphone]?.isGranted == true;
+  if (!mic) debugPrint('Microphone permission missing: audio triggers off.');
+  if (statuses[Permission.sms]?.isGranted != true) {
+    debugPrint('SMS permission missing: SMS channel will be skipped.');
   }
-  return micGranted;
+  return GrantedPermissions(microphone: mic, location: location);
 }
 
-/// Creates mandatory notification channel and configures background service dynamically.
-Future<void> initializeBackgroundService(
-    {required bool enableMicrophone}) async {
+/// Creates the notification channel and configures the foreground service.
+/// Foreground-service types are limited to what was actually granted, since
+/// Android 14 rejects a service that declares a type without its permission.
+Future<void> initializeBackgroundService({
+  required bool enableMicrophone,
+  required bool enableLocation,
+}) async {
   const AndroidNotificationChannel channel = AndroidNotificationChannel(
     'guardian_safety_channel',
     'Guardian Safety Service',
-    description: 'Monitoring motion, rotation, voice keywords & mesh relay in background.',
+    description: 'Monitoring motion, voice, sounds and mesh relay in the background.',
     importance: Importance.low,
   );
 
-  final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
-      FlutterLocalNotificationsPlugin();
-
-  await flutterLocalNotificationsPlugin
+  await FlutterLocalNotificationsPlugin()
       .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin>()
       ?.createNotificationChannel(channel);
 
-  final List<AndroidForegroundType> activeForegroundTypes = [
-    AndroidForegroundType.location,
+  final types = <AndroidForegroundType>[
     AndroidForegroundType.dataSync,
+    if (enableLocation) AndroidForegroundType.location,
+    if (enableMicrophone) AndroidForegroundType.microphone,
   ];
 
-  if (enableMicrophone) {
-    activeForegroundTypes.add(AndroidForegroundType.microphone);
-  }
-
-  final service = FlutterBackgroundService();
-
-  await service.configure(
+  await FlutterBackgroundService().configure(
     androidConfiguration: AndroidConfiguration(
       onStart: onStartService,
       autoStart: false,
       isForegroundMode: true,
       notificationChannelId: 'guardian_safety_channel',
       initialNotificationTitle: 'Guardian Safety Active',
-      initialNotificationContent:
-          'Monitoring motion, rotation & voice keywords in background.',
+      initialNotificationContent: 'Monitoring for emergencies.',
       foregroundServiceNotificationId: 888,
-      foregroundServiceTypes: activeForegroundTypes,
+      foregroundServiceTypes: types,
     ),
     iosConfiguration: IosConfiguration(
       autoStart: true,
@@ -204,79 +176,71 @@ Future<void> initializeBackgroundService(
   );
 }
 
+/// Entry point of the foreground-service isolate. Everything that must keep
+/// working with the screen off is started here.
 @pragma('vm:entry-point')
 void onStartService(ServiceInstance service) async {
+  DartPluginRegistrant.ensureInitialized();
   WidgetsFlutterBinding.ensureInitialized();
 
-  debugPrint("[GUARDIAN_LOG] Background Service: Initializing Firebase...");
-  // Initialize Firebase inside the background isolate
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-
-  // Initialize Firebase Anonymous Auth in background isolate to clear Firestore PERMISSION_DENIED
   try {
+    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
     await FirebaseAuth.instance.signInAnonymously();
-    debugPrint("[GUARDIAN_LOG] Background Service: Firebase Anonymous Auth initialized");
   } catch (e) {
-    debugPrint("[GUARDIAN_LOG] ⚠️ Background Firebase Auth failed: $e");
+    debugPrint('Service: Firebase unavailable, offline paths only: $e');
   }
 
-  debugPrint("[GUARDIAN_LOG] Background Service: Firebase initialized successfully");
+  // Commands from the UI isolate.
+  DiagnosticsHub.instance.startPublishing(service);
+  SosCountdownService.attachService(service);
+  service.on('voice_enabled').listen((event) {
+    VoiceService.toggleVoiceMonitoring(event?['enabled'] == true, fromService: true);
+  });
+  service.on('sim_gps_loss').listen((event) {
+    PdrService().simulateGpsLoss = event?['enabled'] == true;
+  });
+  service.on('send_test_relay').listen((event) async {
+    final fix = PdrService().currentFix();
+    await RelayService().sendTestPacket(lat: fix?.lat ?? 0, lng: fix?.lng ?? 0);
+  });
+  service.on('stop_service').listen((event) => service.stopSelf());
 
-  // 1. Initialize background voice monitoring for lock-screen trigger
+  // B. Dead reckoning (keeps running while this service is alive).
+  await PdrService().start();
+
+  // D. Audio triggers (keywords + sound classes), with cancel countdown.
+  VoiceService.onTranscript = (t) => service.invoke('transcript', {'text': t});
   try {
-    debugPrint("[GUARDIAN_LOG] Background Service: Starting Voice Shield...");
-    await VoiceService.startListening(
-      onSosTriggeredCallback: () async {
-        debugPrint("[GUARDIAN_LOG] Voice Shield: SOS keyword detected! Triggering emergency dispatch...");
-        await EmergencyService.triggerEmergencyDispatch(
-          force: 0.0,
-          level: "Background Voice Shield Trigger",
-        );
-      },
-    );
-    debugPrint("[GUARDIAN_LOG] Background Service: Voice Shield active");
+    await VoiceService.startListening(background: true);
   } catch (e) {
-    debugPrint("[GUARDIAN_LOG] ❌ Error starting voice service in background: $e");
+    debugPrint('Service: audio monitor failed to start: $e');
   }
 
-  // 2. Start Mesh Relay Listener in the background isolate to catch peer SOS signals
+  // C. Listen for SOS packets from nearby phones.
   try {
-    debugPrint("[GUARDIAN_LOG] Background Service: Starting Mesh Relay Listener...");
     await MeshReceiverService().startEmergencyListener();
-    debugPrint("[GUARDIAN_LOG] Background Service: Mesh Relay Listener active");
   } catch (e) {
-    debugPrint("[GUARDIAN_LOG] ❌ Error starting mesh receiver in background: $e");
+    debugPrint('Service: mesh receiver failed to start: $e');
   }
 
-  double latestRotationRate = 0.0;
-
-  // 3. Continuous Gyroscope Listener
-  gyroscopeEventStream().listen((GyroscopeEvent event) {
-    latestRotationRate =
-        sqrt(event.x * event.x + event.y * event.y + event.z * event.z);
-  });
-
-  debugPrint("[GUARDIAN_LOG] Background Service: Sensor monitoring started (Accelerometer + Gyroscope)");
-
-  // 4. Continuous Accelerometer Listener
-  accelerometerEventStream().listen((AccelerometerEvent event) async {
-    double impactForce =
-        sqrt(event.x * event.x + event.y * event.y + event.z * event.z);
-
-    if (impactForce > 25.0 && latestRotationRate > 5.0) {
-      debugPrint(
-          "[GUARDIAN_LOG] Sensor: Sudden rotational impact detected! Force=$impactForce, Rotation=$latestRotationRate");
-
-      EmergencyService.triggerEmergencyDispatch(
-        force: impactForce,
-        level: "Severe Rotational Impact",
-      );
-    }
-  });
-
-  service.on('stop_service').listen((event) {
-    service.stopSelf();
-  });
+  // Impact trigger: hard knock while rotating.
+  double rotation = 0.0;
+  try {
+    gyroscopeEventStream().listen((GyroscopeEvent e) {
+      rotation = sqrt(e.x * e.x + e.y * e.y + e.z * e.z);
+    });
+    accelerometerEventStream().listen((AccelerometerEvent e) {
+      final force = sqrt(e.x * e.x + e.y * e.y + e.z * e.z);
+      if (force > 25.0 && rotation > 5.0) {
+        EmergencyService.triggerEmergencyDispatch(
+          force: force,
+          level: 'Severe Rotational Impact',
+        );
+      }
+    });
+  } catch (e) {
+    debugPrint('Service: motion sensors unavailable: $e');
+  }
 }
 
 class MyApp extends StatelessWidget {
@@ -285,9 +249,13 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final user = FirebaseAuth.instance.currentUser;
+    User? user;
+    try {
+      user = FirebaseAuth.instance.currentUser;
+    } catch (_) {}
 
     return MaterialApp(
+      navigatorKey: navigatorKey,
       debugShowCheckedModeBanner: false,
       title: 'Guardian',
       theme: ThemeData(

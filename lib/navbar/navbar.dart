@@ -1,6 +1,5 @@
 import 'package:easy_help/screens/home.dart';
 import 'package:easy_help/screens/sensor.dart';
-import 'package:easy_help/services/voice_service.dart';
 import 'package:flutter/material.dart';
 
 class MainBottomNavBar extends StatefulWidget {
@@ -12,13 +11,6 @@ class MainBottomNavBar extends StatefulWidget {
 
 class _MainBottomNavBarState extends State<MainBottomNavBar> {
   int _currentIndex = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    // Start background speech monitoring when the main app UI initializes
-    VoiceService.startListening();
-  }
 
   final List<Widget> _screenList = const [
     Home(),

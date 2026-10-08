@@ -25,12 +25,10 @@ dependencies:
   google_maps_flutter: ^2.5.3
   flutter_riverpod: ^2.6.1
   # --- Utilities, AI, Mesh & Communication ---
-  http: ^1.2.2
   permission_handler: ^11.4.0
   url_launcher: ^6.3.2
   background_sms: ^0.0.4
   fast_contacts: ^6.0.0
-  speech_to_text: ^7.4.0
   google_generative_ai: ^0.4.7
   nearby_connections: ^4.2.1
   connectivity_plus: ^6.0.0
