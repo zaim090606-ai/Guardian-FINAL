@@ -7,6 +7,7 @@ import 'package:nearby_connections/nearby_connections.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../logic/sos_packet.dart';
+import 'diagnostics_hub.dart';
 
 /// Sender side of the offline mesh: advertises over Nearby Connections and
 /// hands the SOS packet to every Guardian device that connects.
@@ -50,6 +51,8 @@ class RelayService {
         return false;
       }
 
+      DiagnosticsHub.instance.relayEvent(
+          'Offering ${packet.id} (hop ${packet.hop}, ${packet.source})');
       _active[packet.id] = packet;
       _expiry[packet.id]?.cancel();
       _expiry[packet.id] = Timer(offerWindow, () => _expire(packet.id));
@@ -72,15 +75,24 @@ class RelayService {
           }
         },
         onConnectionResult: (String id, Status status) {
-          if (status == Status.CONNECTED) _sendAll(id);
+          if (status == Status.CONNECTED) {
+            DiagnosticsHub.instance.connectedPeers++;
+            DiagnosticsHub.instance.relayEvent('Peer connected (sender side)');
+            _sendAll(id);
+          }
         },
         onDisconnected: (String id) {
+          final h = DiagnosticsHub.instance;
+          if (h.connectedPeers > 0) h.connectedPeers--;
           debugPrint('Mesh relay peer disconnected: $id');
         },
         serviceId: serviceId,
       );
 
       _advertising = started;
+      DiagnosticsHub.instance.advertising = started;
+      DiagnosticsHub.instance.relayEvent(
+          started ? 'Advertising SOS to nearby phones' : 'Advertising failed');
       debugPrint('Mesh relay advertising: $started');
       return started;
     } catch (e) {
@@ -97,6 +109,8 @@ class RelayService {
           endpointId,
           Uint8List.fromList(utf8.encode(jsonEncode(packet.toJson()))),
         );
+        DiagnosticsHub.instance.sent++;
+        DiagnosticsHub.instance.relayEvent('Sent ${packet.id} to a peer');
       } catch (e) {
         debugPrint('Mesh relay send failed: $e');
       }
@@ -115,6 +129,21 @@ class RelayService {
     if (_active.isEmpty) stopRelay();
   }
 
+  /// SIMULATED: offers a clearly labelled test packet so the relay can be
+  /// demonstrated without a real emergency. The receiver marks it as a test.
+  Future<bool> sendTestPacket({double lat = 0, double lng = 0}) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return broadcast(SosPacket(
+      id: 'test-$now',
+      lat: lat,
+      lng: lng,
+      source: lat == 0 && lng == 0 ? 'unknown' : 'gps',
+      uncertaintyM: 0,
+      timestampMs: now,
+      message: 'SIMULATED TEST SOS (not a real emergency)',
+    ));
+  }
+
   /// Stops advertising, e.g. when the SOS is cancelled.
   Future<void> stopRelay() async {
     for (final t in _expiry.values) {
@@ -124,6 +153,7 @@ class RelayService {
     _active.clear();
     if (!_advertising) return;
     _advertising = false;
+    DiagnosticsHub.instance.advertising = false;
     try {
       await Nearby().stopAdvertising();
       await Nearby().stopAllEndpoints();

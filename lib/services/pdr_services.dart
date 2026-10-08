@@ -33,6 +33,19 @@ class PdrService {
 
   bool get isRunning => _running;
 
+  /// SIMULATED: when true, real GPS fixes are ignored so the dead-reckoning
+  /// path can be demonstrated indoors. Anything produced while this is on is
+  /// flagged as simulated by the callers.
+  bool simulateGpsLoss = false;
+
+  int get steps => _engine.steps;
+  double? get heading => _heading;
+  int? _lastRealGpsMs;
+  double? _lastGpsAccuracy;
+  int? get lastGpsAgeMs =>
+      _lastRealGpsMs == null ? null : _now() - _lastRealGpsMs!;
+  double? get lastGpsAccuracy => _lastGpsAccuracy;
+
   static int _now() => DateTime.now().millisecondsSinceEpoch;
 
   Future<void> start() async {
@@ -115,6 +128,9 @@ class PdrService {
 
   /// Feeds a GPS position (from the stream or from a one-shot request).
   void feedGps(Position p) {
+    if (simulateGpsLoss) return;
+    _lastRealGpsMs = p.timestamp.millisecondsSinceEpoch;
+    _lastGpsAccuracy = p.accuracy;
     _engine.onGpsFix(
       p.latitude,
       p.longitude,

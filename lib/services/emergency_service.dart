@@ -76,6 +76,7 @@ class EmergencyService {
         source: source,
         uncertaintyM: uncertainty,
         trigger: level,
+        simulated: PdrService().simulateGpsLoss,
       );
 
       final packet = SosPacket(
@@ -102,6 +103,7 @@ class EmergencyService {
         'locationSource': source,
         'locationUncertaintyM': uncertainty,
         'isDeadReckoning': source == 'estimated',
+        'locationSimulated': PdrService().simulateGpsLoss,
         'status': 'triggered',
         'audioStatus': micGranted ? 'processing' : 'unavailable',
         'audioUrl': null,
@@ -215,7 +217,7 @@ class EmergencyService {
   static Future<LocationFix?> _resolveLocation() async {
     final pdr = PdrService();
     try {
-      if (await Geolocator.isLocationServiceEnabled()) {
+      if (!pdr.simulateGpsLoss && await Geolocator.isLocationServiceEnabled()) {
         final perm = await Geolocator.checkPermission();
         if (perm != LocationPermission.denied &&
             perm != LocationPermission.deniedForever) {
@@ -233,7 +235,7 @@ class EmergencyService {
     }
 
     LocationFix? fix = pdr.currentFix();
-    if (fix == null) {
+    if (fix == null && !pdr.simulateGpsLoss) {
       try {
         final last = await Geolocator.getLastKnownPosition();
         if (last != null) {
@@ -259,6 +261,7 @@ class EmergencyService {
         'locationSource': fix.source,
         'locationUncertaintyM': fix.uncertaintyM,
         'isDeadReckoning': fix.source == 'estimated',
+        'locationSimulated': PdrService().simulateGpsLoss,
         'lastLiveUpdate': FieldValue.serverTimestamp(),
       }));
     });

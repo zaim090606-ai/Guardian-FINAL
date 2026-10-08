@@ -11,6 +11,9 @@ class AudioRecorderService {
   static AudioRecorder? _audioRecorder;
   static String? _currentRecordingPath;
 
+  /// True while evidence audio is being recorded (the voice monitor yields).
+  static bool isCapturing = false;
+
   static AudioRecorder _getRecorder() {
     _audioRecorder ??= AudioRecorder();
     return _audioRecorder!;

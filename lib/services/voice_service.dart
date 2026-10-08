@@ -14,7 +14,9 @@ import '../logic/trigger_logic.dart';
 import 'ai_service.dart';
 import 'audio_recorder_service.dart';
 import 'emergency_service.dart';
+import 'diagnostics_hub.dart';
 import 'local_whisper_service.dart';
+import 'sos_countdown_service.dart';
 import 'yamnet_service.dart';
 
 /// Always-on offline audio monitor.
@@ -86,16 +88,21 @@ class VoiceService {
     if (_isListening) return;
 
     // The service isolate cannot show a permission dialog, so only check.
+    final hub = DiagnosticsHub.instance;
     if (!await Permission.microphone.isGranted) {
+      hub.micStatus = 'denied';
       debugPrint('Microphone permission missing: audio triggers are off.');
       return;
     }
+    hub.micStatus = 'granted';
 
     if (!_enginesReady) {
       await _yamnetService.initialize();
       await LocalWhisperService.initialize();
       _enginesReady = true;
     }
+    hub.yamnetLoaded = _yamnetService.isAvailable;
+    hub.whisperLoaded = LocalWhisperService.isAvailable;
     if (!_yamnetService.isAvailable && !LocalWhisperService.isAvailable) {
       debugPrint('No audio engine could be loaded: audio triggers are off.');
       return;
@@ -259,6 +266,10 @@ class VoiceService {
       if (_yamnetService.isAvailable) {
         final results = await _yamnetService.classifySamples(samples);
         for (final r in results) {
+          final hub = DiagnosticsHub.instance;
+          hub.lastLabel = r.isDistress ? r.distressLabel : r.topLabel;
+          hub.lastScore = r.isDistress ? r.distressScore : r.topScore;
+          hub.lastDetectionMs = DateTime.now().millisecondsSinceEpoch;
           if (_debouncer.add(r.isDistress)) {
             acousticConfirmed = true;
             acousticLabel = r.distressLabel;
@@ -295,6 +306,11 @@ class VoiceService {
       _isTriggered = true;
       _debouncer.reset();
       try {
+        // Give the user a chance to cancel a false alarm before anything is sent.
+        if (!await SosCountdownService.confirm(reason)) {
+          debugPrint('Audio SOS cancelled by the user.');
+          return;
+        }
         await EmergencyService.triggerEmergencyDispatch(
           force: 0.0,
           level: reason,

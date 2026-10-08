@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../logic/relay_policy.dart';
 import '../logic/sos_packet.dart';
+import 'diagnostics_hub.dart';
 import 'relay_service.dart';
 
 /// Receiver side of the mesh. Discovers Guardian devices that are advertising
@@ -64,6 +65,8 @@ class MeshReceiverService {
         RelayService.strategy,
         onEndpointFound:
             (String endpointId, String endpointName, String serviceId) {
+          DiagnosticsHub.instance.peersFound++;
+          DiagnosticsHub.instance.relayEvent('Found peer $endpointName');
           _connectTo(endpointId);
         },
         onEndpointLost: (String? endpointId) {
@@ -71,6 +74,10 @@ class MeshReceiverService {
         },
         serviceId: RelayService.serviceId,
       );
+      DiagnosticsHub.instance.discovering = _isDiscovering;
+      DiagnosticsHub.instance.relayEvent(_isDiscovering
+          ? 'Discovering nearby SOS senders'
+          : 'Discovery could not start');
       debugPrint('Mesh receiver discovering: $_isDiscovering');
     } catch (e) {
       _isDiscovering = false;
@@ -98,9 +105,15 @@ class MeshReceiverService {
           );
         },
         onConnectionResult: (String id, Status status) {
-          if (status != Status.CONNECTED) _requested.remove(endpointId);
+          if (status == Status.CONNECTED) {
+            DiagnosticsHub.instance.connectedPeers++;
+          } else {
+            _requested.remove(endpointId);
+          }
         },
         onDisconnected: (String id) {
+          final h = DiagnosticsHub.instance;
+          if (h.connectedPeers > 0) h.connectedPeers--;
           _requested.remove(endpointId);
         },
       );
@@ -112,7 +125,20 @@ class MeshReceiverService {
 
   Future<void> _onPayload(List<int> bytes) async {
     try {
+      final h = DiagnosticsHub.instance;
+      h.received++;
       final outcome = await _handler.handleRaw(utf8.decode(bytes));
+      switch (outcome) {
+        case RelayOutcome.uploaded:
+          h.uploaded++;
+        case RelayOutcome.queued:
+          h.queued++;
+        case RelayOutcome.invalid:
+        case RelayOutcome.duplicate:
+          break;
+      }
+      h.pending = _handler.queue.length;
+      h.relayEvent('Received packet: ${outcome.name}');
       debugPrint('Mesh payload outcome: $outcome');
       if (outcome == RelayOutcome.uploaded || outcome == RelayOutcome.queued) {
         await _persistQueue();
@@ -150,9 +176,10 @@ class MeshReceiverService {
             'isDeadReckoning': p.source == 'estimated',
             'originTimestamp': Timestamp.fromMillisecondsSinceEpoch(p.timestampMs),
             'alertMessage': p.message,
-            'status': 'mesh_relayed',
-            'riskLevel': 'HIGH',
+            'status': p.id.startsWith('test-') ? 'test' : 'mesh_relayed',
+            'riskLevel': p.id.startsWith('test-') ? 'TEST' : 'HIGH',
             'eventType': 'mesh_relay',
+            'simulated': p.id.startsWith('test-'),
           });
         }
       }).timeout(const Duration(seconds: 10));
@@ -174,6 +201,9 @@ class MeshReceiverService {
     if (_handler.queue.length == 0) return;
     final n = await _handler.flush();
     if (n > 0) {
+      DiagnosticsHub.instance.uploaded += n;
+      DiagnosticsHub.instance.pending = _handler.queue.length;
+      DiagnosticsHub.instance.relayEvent('Retry uploaded $n queued alert(s)');
       debugPrint('Mesh queue: uploaded $n queued alert(s).');
       await _persistQueue();
     }
@@ -249,6 +279,7 @@ class MeshReceiverService {
         await Nearby().stopDiscovery();
       } catch (_) {}
       _isDiscovering = false;
+      DiagnosticsHub.instance.discovering = false;
     }
     _requested.clear();
   }
