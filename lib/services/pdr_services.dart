@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
 import '../logic/anchor_beacon.dart';
+import '../logic/error_meter.dart';
 import '../logic/motion_context.dart';
 import '../logic/pdr_config.dart';
 import '../logic/pdr_engine.dart';
@@ -47,7 +48,32 @@ class PdrService {
   /// SIMULATED: when true, real GPS fixes are ignored so the dead-reckoning
   /// path can be demonstrated indoors. Anything produced while this is on is
   /// flagged as simulated by the callers.
-  bool simulateGpsLoss = false;
+  bool _simulateGpsLoss = false;
+  bool get simulateGpsLoss => _simulateGpsLoss;
+  set simulateGpsLoss(bool on) {
+    if (on == _simulateGpsLoss) return;
+    _simulateGpsLoss = on;
+    if (on) {
+      _stepsAtLoss = _engine.steps;
+      errorMeter.start(_now());
+    } else {
+      _updateErrorMeter();
+      errorMeter.stop();
+    }
+  }
+
+  /// Ground-truth error meter (real GPS compared with the estimate while GPS
+  /// loss is simulated). The real GPS never feeds the estimate.
+  final ErrorMeter errorMeter = ErrorMeter();
+  int _stepsAtLoss = 0;
+
+  void _updateErrorMeter() {
+    if (!errorMeter.active) return;
+    final f = _engine.currentFix(_now());
+    final walked = (_engine.steps - _stepsAtLoss) * _engine.currentStrideM;
+    if (f == null) return;
+    errorMeter.onEstimate(f.lat, f.lng, walked, _now());
+  }
 
   /// Feeds one YAMNet chunk (labels scoring >= 0.1) from the audio engine.
   /// Without a classifier nothing is fed and the context stays unknown.
@@ -196,7 +222,12 @@ class PdrService {
 
   /// Feeds a GPS position (from the stream or from a one-shot request).
   void feedGps(Position p) {
-    if (simulateGpsLoss) return;
+    if (simulateGpsLoss) {
+      // Silent ground truth: used only to measure the error.
+      errorMeter.onTruth(
+          p.latitude, p.longitude, p.timestamp.millisecondsSinceEpoch);
+      return;
+    }
     _rememberLastKnown(p);
     _lastRealGpsMs = p.timestamp.millisecondsSinceEpoch;
     _lastGpsAccuracy = p.accuracy;
@@ -254,6 +285,7 @@ class PdrService {
   /// Best current location, or null when no GPS fix has ever been seen.
   LocationFix? currentFix() {
     _engine.onContext(motionContext, _now());
+    _updateErrorMeter();
     return _engine.currentFix(_now());
   }
 

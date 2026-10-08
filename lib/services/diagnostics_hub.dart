@@ -75,6 +75,7 @@ class DiagnosticsHub {
         'lastLabel': lastLabel,
         'lastScore': lastScore,
         'lastDetectionMs': lastDetectionMs,
+        'motionContext': PdrService().motionContext.name,
       };
 
   /// Service isolate: push snapshots to the UI.

@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:async';
 import 'dart:math';
 import 'dart:ui';
@@ -20,6 +21,7 @@ import 'screens/firstscreen.dart';
 import 'services/diagnostics_hub.dart';
 import 'services/emergency_service.dart';
 import 'services/mesh_receiver_service.dart';
+import 'logic/anchor_beacon.dart';
 import 'services/pdr_services.dart';
 import 'services/relay_service.dart';
 import 'services/sos_countdown_service.dart';
@@ -201,6 +203,14 @@ void onStartService(ServiceInstance service) async {
   });
   service.on('sim_gps_loss').listen((event) {
     PdrService().simulateGpsLoss = event?['enabled'] == true;
+  });
+  service.on('pdr_config').listen((event) {
+    if (event != null) PdrService().config.applyMap(event);
+  });
+  service.on('test_anchor').listen((event) {
+    if (event == null) return;
+    final b = parseBeacon(jsonEncode(event), DateTime.now().millisecondsSinceEpoch);
+    if (b != null) PdrService().onAnchor(b, simulated: true);
   });
   service.on('send_test_relay').listen((event) async {
     final fix = PdrService().currentFix();

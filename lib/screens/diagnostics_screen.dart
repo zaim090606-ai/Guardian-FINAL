@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 
+import '../logic/anchor_beacon.dart';
+import '../logic/pdr_config.dart';
 import '../logic/pdr_engine.dart' show formatAge;
 import '../logic/sos_dispatcher.dart';
 import '../services/diagnostics_hub.dart';
@@ -50,6 +52,48 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
       FlutterBackgroundService().invoke('sim_gps_loss', {'enabled': on});
     } catch (_) {}
     setState(() {});
+  }
+
+  void _setFlag(String name, bool on) {
+    final cfg = PdrService().config;
+    final map = cfg.toMap()..[name] = on;
+    cfg.applyMap(map);
+    try {
+      FlutterBackgroundService().invoke('pdr_config', map);
+    } catch (_) {}
+    setState(() {});
+  }
+
+  void _setAllFlags(bool on) {
+    final cfg = PdrService().config..setAll(on);
+    try {
+      FlutterBackgroundService().invoke('pdr_config', cfg.toMap());
+    } catch (_) {}
+    setState(() {});
+  }
+
+  String? _anchorMessage;
+
+  /// SIMULATED: pretends a nearby phone with good GPS is standing at the real
+  /// GPS position (ground truth read while GPS loss is simulated).
+  void _sendTestAnchor() {
+    final pdr = PdrService();
+    final m = pdr.errorMeter;
+    if (!pdr.simulateGpsLoss || !m.hasTruth) {
+      setState(() => _anchorMessage =
+          'SIMULATED anchor needs "Simulate GPS loss" ON and a real GPS reading.');
+      return;
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final b = AnchorBeacon(
+        lat: m.truthLat!, lng: m.truthLng!, accuracyM: 10, timestampMs: now);
+    final e = pdr.onAnchor(b, simulated: true);
+    try {
+      FlutterBackgroundService().invoke('test_anchor', b.toJson());
+    } catch (_) {}
+    setState(() => _anchorMessage = e == null
+        ? 'SIMULATED anchor not used (flag off, or the estimate is still GPS-fresh).'
+        : 'SIMULATED anchor used: radius ${e.radiusBeforeM.round()} -> ${e.radiusAfterM.round()} m');
   }
 
   Future<void> _sendTestRelay() async {
@@ -100,6 +144,9 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
               onChanged: _setSimulation,
             ),
           ]),
+          _section('Dead-reckoning error vs real GPS', _groundTruth(pdr)),
+          _section('PDR improvements', _flags(pdr)),
+          _section('Motion context and anchors', _contextAndAnchors(pdr, remote)),
           _section('Mesh relay', [
             _row('State', '${remote['relayState'] ?? 'service not reporting'}'),
             _row('Peers found', '${remote['peersFound'] ?? 0}'),
@@ -150,6 +197,108 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
         ],
       ),
     );
+  }
+
+  List<Widget> _groundTruth(PdrService pdr) {
+    final m = pdr.errorMeter;
+    String metres(double? v) => v == null ? '-' : '${v.toStringAsFixed(1)} m';
+    return [
+      if (m.active)
+        _banner('SIMULATED GPS loss: real GPS is read only to measure the error'),
+      _row('Walked since loss (steps x stride)', '${m.walkedM.toStringAsFixed(0)} m'),
+      _row('Current error vs real GPS', metres(m.errorM)),
+      _row('Max error', metres(m.hasRun ? m.maxErrorM : null)),
+      _row('Error / distance',
+          m.percent == null ? '-' : '${m.percent!.toStringAsFixed(0)} %'),
+      const SizedBox(height: 6),
+      Container(
+        padding: const EdgeInsets.all(10),
+        color: Colors.blueGrey.shade50,
+        child: SelectableText(
+          'Run summary${m.active ? ' (running, SIMULATED loss)' : ''}: ${m.summary()}\n'
+          'Flags: ${_flagLine(pdr.config)}',
+          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+        ),
+      ),
+    ];
+  }
+
+  String _flagLine(PdrConfig c) => c
+      .toMap()
+      .entries
+      .map((e) => '${e.key}=${e.value ? "ON" : "OFF"}')
+      .join(' ');
+
+  List<Widget> _flags(PdrService pdr) {
+    final c = pdr.config;
+    final eng = pdr.engine;
+    Widget sw(String title, String key, bool value, String sub) =>
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          dense: true,
+          title: Text('$title: ${value ? "ON" : "OFF"}'),
+          subtitle: Text(sub, style: const TextStyle(fontSize: 11)),
+          value: value,
+          onChanged: (v) => _setFlag(key, v),
+        );
+    return [
+      Row(children: [
+        OutlinedButton(onPressed: () => _setAllFlags(true), child: const Text('All ON')),
+        const SizedBox(width: 8),
+        OutlinedButton(onPressed: () => _setAllFlags(false), child: const Text('All OFF')),
+      ]),
+      sw('Compass gating', 'compassGating', c.compassGating,
+          'Ignore magnetometer samples outside 25-65 uT'),
+      sw('Heading offset', 'headingOffset', c.headingOffset,
+          'Learn GPS course minus compass while GPS is good'),
+      sw('Stride learning', 'strideLearning', c.strideLearning,
+          'Learn stride from GPS distance / steps'),
+      sw('Microphone context', 'microphoneContext', c.microphoneContext,
+          'Vehicle / stationary from YAMNet sound labels'),
+      sw('Anchors', 'anchors', c.anchors,
+          'Use positions of nearby Guardian phones with good GPS'),
+      const Divider(),
+      _row(
+          'Heading offset learned',
+          eng.headingOffsetDeg == null
+              ? (eng.headingOffsetInvalidated ? 'invalid (phone moved)' : 'not yet')
+              : '${eng.headingOffsetDeg!.toStringAsFixed(1)} deg'),
+      _row('Stride in use',
+          '${eng.currentStrideM.toStringAsFixed(2)} m${eng.strideCalibrated ? " (learned)" : " (default)"}'),
+      _row('Drift fraction (assumption)', eng.driftFraction.toStringAsFixed(2)),
+      _row('Compass samples rejected', '${pdr.rejectedMagSamples}'),
+    ];
+  }
+
+  List<Widget> _contextAndAnchors(PdrService pdr, Map<String, dynamic> remote) {
+    final a = pdr.lastAnchor;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final local = pdr.motionContext.name;
+    final svc = remote['motionContext'];
+    return [
+      _row('Motion context (app / service)', '$local / ${svc ?? "-"}'),
+      _row(
+          'Last anchor',
+          a == null
+              ? 'none'
+              : '${formatAge(((now - a.atMs) / 1000).round())}${a.simulated ? " (SIMULATED)" : ""}'),
+      if (a != null) ...[
+        _row('Anchor age when used', '${a.anchorAgeS} s'),
+        _row('Radius before -> after',
+            '${a.radiusBeforeM.round()} m -> ${a.radiusAfterM.round()} m'),
+        _row('Action', a.snapped ? 'snapped to anchor' : 'weighted'),
+      ],
+      const SizedBox(height: 6),
+      OutlinedButton(
+        onPressed: _sendTestAnchor,
+        child: const Text('Send test anchor (SIMULATED beacon)'),
+      ),
+      if (_anchorMessage != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Text(_anchorMessage!, style: const TextStyle(fontSize: 12)),
+        ),
+    ];
   }
 
   String _channelName(String c) => switch (c) {
