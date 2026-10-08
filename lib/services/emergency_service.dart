@@ -26,7 +26,8 @@ import 'relay_service.dart';
 class EmergencyService {
   static const String _contactKey = 'emergency_contact_number';
   static const String _attemptLogKey = 'sos_attempt_log';
-  static const String _trackingBase = 'https://fir-b10e4.web.app/alert/';
+  /// Hosting site of the Firebase project the app writes to (guardian-b7926).
+  static const String _trackingBase = 'https://guardian-b7926.web.app';
   static const MethodChannel _smsChannel = MethodChannel('com.guardian.app/sms');
 
   static bool _isDispatching = false;
@@ -70,7 +71,7 @@ class EmergencyService {
       final micGranted = await Permission.microphone.isGranted;
 
       final text = buildSosText(
-        trackingUrl: '$_trackingBase$docId',
+        trackingUrl: buildTrackingUrl(_trackingBase, docId),
         lat: lat,
         lng: lng,
         source: source,
@@ -235,6 +236,9 @@ class EmergencyService {
     }
 
     LocationFix? fix = pdr.currentFix();
+    if (fix == null && !pdr.simulateGpsLoss) {
+      fix = await PdrService.loadLastKnown();
+    }
     if (fix == null && !pdr.simulateGpsLoss) {
       try {
         final last = await Geolocator.getLastKnownPosition();

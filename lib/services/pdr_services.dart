@@ -3,6 +3,7 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
 import '../logic/pdr_engine.dart';
@@ -129,6 +130,7 @@ class PdrService {
   /// Feeds a GPS position (from the stream or from a one-shot request).
   void feedGps(Position p) {
     if (simulateGpsLoss) return;
+    _rememberLastKnown(p);
     _lastRealGpsMs = p.timestamp.millisecondsSinceEpoch;
     _lastGpsAccuracy = p.accuracy;
     _engine.onGpsFix(
@@ -137,6 +139,45 @@ class PdrService {
       p.accuracy,
       p.timestamp.millisecondsSinceEpoch,
     );
+  }
+
+  static const String _lastKnownKey = 'last_known_fix';
+  int _lastSavedMs = 0;
+
+  /// Keeps the last real fix on disk (at most every 30 s) so an SOS raised
+  /// after a restart or in a dead zone can still carry coordinates.
+  void _rememberLastKnown(Position p) {
+    final now = _now();
+    if (now - _lastSavedMs < 30000) return;
+    _lastSavedMs = now;
+    SharedPreferences.getInstance().then((prefs) => prefs.setString(
+          _lastKnownKey,
+          '${p.latitude},${p.longitude},${p.accuracy},${p.timestamp.millisecondsSinceEpoch}',
+        ));
+  }
+
+  /// The stored last real fix, marked source "last_known", or null.
+  static Future<LocationFix?> loadLastKnown() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      final parts = (prefs.getString(_lastKnownKey) ?? '').split(',');
+      if (parts.length != 4) return null;
+      final lat = double.tryParse(parts[0]);
+      final lng = double.tryParse(parts[1]);
+      final acc = double.tryParse(parts[2]);
+      final ts = int.tryParse(parts[3]);
+      if (lat == null || lng == null || acc == null || ts == null) return null;
+      return LocationFix(
+        lat: lat,
+        lng: lng,
+        source: 'last_known',
+        uncertaintyM: acc,
+        timeMs: ts,
+      );
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Best current location, or null when no GPS fix has ever been seen.
