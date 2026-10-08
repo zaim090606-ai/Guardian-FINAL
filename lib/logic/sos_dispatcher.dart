@@ -77,7 +77,7 @@ class AttemptLog {
 typedef SosChannel = Future<bool> Function();
 
 /// Runs the SOS channels so that no single path is a point of failure:
-///  * cloud (Firestore) and SMS start together;
+///  * cloud (Firestore) goes first, then SMS and the mesh fallback;
 ///  * every channel has its own timeout and exceptions are contained;
 ///  * the mesh relay is tried when the cloud upload did not succeed;
 ///  * every attempt is reported to [onAttempt].
@@ -91,19 +91,24 @@ class SosDispatcher {
   SosDispatcher({
     required this.onAttempt,
     int Function()? nowMs,
-    this.cloudTimeout = const Duration(seconds: 8),
+    this.cloudTimeout = const Duration(seconds: 6),
     this.smsTimeout = const Duration(seconds: 30),
     this.meshTimeout = const Duration(seconds: 10),
   }) : nowMs = nowMs ?? (() => DateTime.now().millisecondsSinceEpoch);
 
+  /// Order: the cloud copy of the alert is created first, so that the tracking
+  /// link in the SMS already points at an existing document whenever there is
+  /// any internet. Offline, that attempt fails at once (the write stays queued
+  /// locally) and nothing is delayed. SMS and the mesh fallback then run
+  /// together.
   Future<List<SosAttempt>> dispatch({
     required String sosId,
     required SosChannel cloud,
     required SosChannel sms,
     required SosChannel mesh,
   }) async {
-    final smsFuture = _run(sosId, 'sms', sms, smsTimeout);
     final cloudResult = await _run(sosId, 'cloud', cloud, cloudTimeout);
+    final smsFuture = _run(sosId, 'sms', sms, smsTimeout);
     Future<SosAttempt>? meshFuture;
     if (!cloudResult.ok) {
       meshFuture = _run(sosId, 'mesh', mesh, meshTimeout);
@@ -162,8 +167,19 @@ String extractPhone(String stored) {
   return normalizePhone(m != null ? m.group(1)! : stored);
 }
 
-/// Builds the SMS text. Always carries coordinates so it is useful even when
-/// the tracking page cannot be reached.
+/// Public tracker page for an alert: <base>/alert/<id> (hosting rewrites
+/// /alert/** to the tracker page, which reads the id from the path).
+String buildTrackingUrl(String base, String id) {
+  final b = base.endsWith('/') ? base.substring(0, base.length - 1) : base;
+  return '$b/alert/${Uri.encodeComponent(id)}';
+}
+
+/// Plain Google Maps link that works without the tracker page.
+String buildMapsUrl(double lat, double lng) => 'https://maps.google.com/?q=$lat,$lng';
+
+/// Builds the SMS text. It always carries a plain maps link (when any
+/// coordinates exist) next to the tracker link, so the recipient still gets a
+/// location if the tracker page cannot load.
 String buildSosText({
   required String trackingUrl,
   required double lat,
@@ -177,20 +193,29 @@ String buildSosText({
   final hasLocation = !(lat == 0 && lng == 0) && source != 'unknown';
   final String where;
   if (hasLocation) {
-    final label = source == 'estimated'
-        ? (simulated ? 'ESTIMATED, SIMULATED GPS LOSS' : 'ESTIMATED')
-        : 'GPS';
-    where = 'https://maps.google.com/?q=$lat,$lng ($label +/-${uncertaintyM.round()}m)';
+    final String label;
+    switch (source) {
+      case 'estimated':
+        label = simulated ? 'ESTIMATED, SIMULATED GPS LOSS' : 'ESTIMATED';
+      case 'last_known':
+        label = 'LAST KNOWN';
+      default:
+        label = 'GPS';
+    }
+    where = '${buildMapsUrl(lat, lng)} ($label +/-${uncertaintyM.round()}m)';
   } else {
-    where = 'unavailable';
+    where = 'unavailable (no location fix yet)';
   }
-  final buf = StringBuffer('URGENT SOS from Guardian\n')
+  final buf = StringBuffer()
+    ..writeln('URGENT SOS from Guardian')
     ..writeln('Tracking: $trackingUrl')
-    ..writeln('Location: $where')
+    ..writeln('Map: $where')
     ..write('Trigger: $trigger');
   final s = summary.trim();
   if (s.isNotEmpty) {
-    buf.write('\n${s.length > 160 ? '${s.substring(0, 157)}...' : s}');
+    buf
+      ..writeln()
+      ..write(s.length > 160 ? '${s.substring(0, 157)}...' : s);
   }
   return buf.toString();
 }

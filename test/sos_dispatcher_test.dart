@@ -100,7 +100,7 @@ void main() {
     expect(r[2].ok, isTrue);
   });
 
-  test('sms starts before the cloud attempt finishes', () async {
+  test('cloud copy is created before the SMS with the link is sent', () async {
     final order = <String>[];
     await make().dispatch(
         sosId: 'x',
@@ -114,7 +114,17 @@ void main() {
           return true;
         },
         mesh: () => ok('mesh'));
-    expect(order, ['sms-start', 'cloud-done']);
+    expect(order, ['cloud-done', 'sms-start']);
+  });
+
+  test('offline cloud failure does not delay the SMS', () async {
+    final sw = Stopwatch()..start();
+    await make().dispatch(
+        sosId: 'x',
+        cloud: () async => throw StateError('offline'),
+        sms: () => ok('sms'),
+        mesh: () => ok('mesh'));
+    expect(sw.elapsedMilliseconds, lessThan(100));
   });
 
   test('every attempt is logged with its outcome', () async {
@@ -175,32 +185,75 @@ void main() {
     });
   });
 
+  group('buildTrackingUrl', () {
+    test('uses the /alert/<id> path the hosting rewrite expects', () {
+      expect(buildTrackingUrl('https://guardian-b7926.web.app', 'AbC123xyz'),
+          'https://guardian-b7926.web.app/alert/AbC123xyz');
+    });
+    test('tolerates a trailing slash and encodes the id', () {
+      expect(buildTrackingUrl('https://h.web.app/', 'a b'),
+          'https://h.web.app/alert/a%20b');
+    });
+  });
+
   group('buildSosText', () {
-    test('includes tracking link, coordinates and source', () {
+    String text({double lat = 28.5, double lng = 77.1, String source = 'gps'}) =>
+        buildSosText(
+            trackingUrl: 'https://h.web.app/alert/ID',
+            lat: lat,
+            lng: lng,
+            source: source,
+            uncertaintyM: 7.4,
+            trigger: 'Whisper Keyword');
+
+    test('always contains the plain maps fallback link', () {
+      expect(text(), contains('https://maps.google.com/?q=28.5,77.1'));
+      expect(text(source: 'estimated'),
+          contains('https://maps.google.com/?q=28.5,77.1'));
+      expect(text(source: 'last_known'), contains('LAST KNOWN'));
+      expect(text(source: 'last_known'),
+          contains('https://maps.google.com/?q=28.5,77.1'));
+    });
+
+    test('contains both links and the trigger', () {
+      final t = text();
+      expect(t, contains('Tracking: https://h.web.app/alert/ID'));
+      expect(t, contains('Map: https://maps.google.com/'));
+      expect(t, contains('GPS +/-7m'));
+      expect(t, contains('Trigger: Whisper Keyword'));
+    });
+
+    test('no coordinates: says so but still has the tracking link', () {
+      final t = text(lat: 0, lng: 0, source: 'unknown');
+      expect(t, contains('unavailable'));
+      expect(t, isNot(contains('maps.google.com')));
+      expect(t, contains('Tracking: https://h.web.app/alert/ID'));
+    });
+
+    test('simulated GPS loss is labelled', () {
       final t = buildSosText(
-          trackingUrl: 'https://x/alert/1',
-          lat: 28.5,
-          lng: 77.1,
+          trackingUrl: 'u',
+          lat: 1,
+          lng: 2,
           source: 'estimated',
           uncertaintyM: 12.4,
-          trigger: 'Whisper Keyword');
-      expect(t, contains('https://x/alert/1'));
-      expect(t, contains('28.5,77.1'));
-      expect(t, contains('ESTIMATED'));
+          trigger: 't',
+          simulated: true);
+      expect(t, contains('SIMULATED'));
       expect(t, contains('12m'));
     });
 
-    test('unknown location says unavailable and long summary is cut', () {
+    test('long summary is cut and kept on its own line', () {
       final t = buildSosText(
           trackingUrl: 'u',
-          lat: 0,
-          lng: 0,
-          source: 'unknown',
-          uncertaintyM: 0,
+          lat: 1,
+          lng: 2,
+          source: 'gps',
+          uncertaintyM: 1,
           trigger: 't',
           summary: 'x' * 500);
-      expect(t, contains('unavailable'));
-      expect(t.length, lessThan(400));
+      expect(t.length, lessThan(420));
+      expect(t.trimRight().split(RegExp(r'[\r\n]+')).last, startsWith('xxx'));
     });
   });
 }

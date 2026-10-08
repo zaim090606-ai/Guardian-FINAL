@@ -1,6 +1,6 @@
 /// SOS payload exchanged over the mesh and used to build the Firestore document.
 class SosPacket {
-  static const Set<String> validSources = {'gps', 'estimated', 'unknown'};
+  static const Set<String> validSources = {'gps', 'estimated', 'last_known', 'unknown'};
   static final RegExp _idPattern = RegExp(r'^[A-Za-z0-9_-]{1,128}$');
 
   final String id;
