@@ -17,6 +17,7 @@ import 'emergency_service.dart';
 import 'diagnostics_hub.dart';
 import 'local_whisper_service.dart';
 import 'sos_countdown_service.dart';
+import 'pdr_services.dart';
 import 'yamnet_service.dart';
 
 /// Always-on offline audio monitor.
@@ -284,6 +285,7 @@ class VoiceService {
           hub.lastLabel = r.isDistress ? r.distressLabel : r.topLabel;
           hub.lastScore = r.isDistress ? r.distressScore : r.topScore;
           hub.lastDetectionMs = DateTime.now().millisecondsSinceEpoch;
+          PdrService().onSoundLabels(r.labelScores);
           if (r.speechScore > speechScore) speechScore = r.speechScore;
           if (_debouncer.add(r.isDistress)) {
             acousticConfirmed = true;

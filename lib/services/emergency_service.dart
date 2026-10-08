@@ -109,6 +109,7 @@ class EmergencyService {
         'isDeadReckoning': source == 'estimated',
         'locationFixTimeMs': fix?.timeMs,
         'locationAgeS': fixAgeS,
+        'locationContext': fix?.context ?? '',
         'locationSimulated': PdrService().simulateGpsLoss,
         'status': 'triggered',
         'audioStatus': micGranted ? 'processing' : 'unavailable',
@@ -276,6 +277,7 @@ class EmergencyService {
         'isDeadReckoning': fix.source == 'estimated',
         'locationFixTimeMs': fix.timeMs,
         'locationAgeS': fix.ageSinceGpsS,
+        'locationContext': fix.context,
         'locationSimulated': PdrService().simulateGpsLoss,
         'lastLiveUpdate': FieldValue.serverTimestamp(),
       }));

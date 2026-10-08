@@ -1,6 +1,8 @@
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'motion_context.dart';
+
 /// Lower-cases and strips punctuation so keywords match Whisper output.
 String sanitizeText(String input) {
   return input
@@ -46,6 +48,9 @@ class DistressResult {
   /// Best score among speech-like classes (speech, shouting, screaming, siren).
   final double speechScore;
 
+  /// Every class scoring at least 0.1, used for the motion context.
+  final List<LabelScore> labelScores;
+
   const DistressResult({
     required this.topLabel,
     required this.topScore,
@@ -53,6 +58,7 @@ class DistressResult {
     required this.distressScore,
     required this.isDistress,
     this.speechScore = 0,
+    this.labelScores = const [],
   });
 }
 
@@ -122,6 +128,10 @@ class DistressClassifier {
       if (i < scores.length && scores[i] > speech) speech = scores[i];
     }
     return DistressResult(
+      labelScores: [
+        for (int i = 0; i < scores.length && i < labels.length; i++)
+          if (scores[i] >= 0.1) LabelScore(labels[i], scores[i])
+      ],
       speechScore: speech,
       topLabel: topLabel,
       topScore: topScore,

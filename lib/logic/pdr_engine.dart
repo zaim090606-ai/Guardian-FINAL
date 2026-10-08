@@ -1,5 +1,6 @@
 import 'dart:math';
 
+import 'motion_context.dart';
 import 'pdr_config.dart';
 
 class LocationFix {
@@ -17,6 +18,9 @@ class LocationFix {
   /// When this fix object was produced ("now").
   final int generatedAtMs;
 
+  /// Motion context name (e.g. 'vehicle'), or '' when unknown.
+  final String context;
+
   const LocationFix({
     required this.lat,
     required this.lng,
@@ -24,6 +28,7 @@ class LocationFix {
     required this.uncertaintyM,
     required this.timeMs,
     int? generatedAtMs,
+    this.context = '',
   }) : generatedAtMs = generatedAtMs ?? timeMs;
 
   /// Seconds since the position was last confirmed by GPS (0 for a live fix).
@@ -148,6 +153,11 @@ class PdrEngine {
   static const int minOffsetSamples = 3;
   static const int minStrideSamples = 2;
 
+  /// ASSUMPTION: fastest plausible ground speed while in a vehicle whose
+  /// direction we cannot know, and the cap on the radius that implies.
+  static const double vehicleMaxSpeedMps = 8;
+  static const double vehicleMaxGrowthM = 2000;
+
   final PdrConfig config;
   final double strideM;
   final int staleAfterMs;
@@ -165,6 +175,11 @@ class PdrEngine {
   double _driftM = 0;
   double _extraUncertaintyM = 0;
   int _steps = 0;
+
+  // Motion context (microphone).
+  MotionContext _context = MotionContext.unknown;
+  double _vehicleBankedM = 0;
+  int _vehicleSinceMs = 0;
 
   // Learned from GPS.
   double _stride;
@@ -196,6 +211,28 @@ class PdrEngine {
   double get distanceSinceFixM => _distanceSinceFix;
   bool get hasAnchor => _lat != null;
   double? get compassHeading => _heading;
+
+  /// Context in effect (unknown when the microphone flag is off).
+  MotionContext get context =>
+      config.microphoneContext ? _context : MotionContext.unknown;
+  bool get inVehicle => context == MotionContext.vehicle;
+
+  /// Feeds the microphone-derived context. While vehicle, steps are ignored
+  /// and the uncertainty grows with time (we do not guess a direction).
+  void onContext(MotionContext c, int nowMs) {
+    if (c == _context) return;
+    final wasVehicle = _context == MotionContext.vehicle;
+    if (wasVehicle) _vehicleBankedM = _vehicleGrowthM(nowMs);
+    if (c == MotionContext.vehicle) _vehicleSinceMs = nowMs;
+    _context = c;
+  }
+
+  double _vehicleGrowthM(int nowMs) {
+    final live = inVehicle
+        ? vehicleMaxSpeedMps * max(0, nowMs - _vehicleSinceMs) / 1000.0
+        : 0.0;
+    return min(vehicleMaxGrowthM, _vehicleBankedM + live);
+  }
 
   /// Stride in use (learned when enabled and calibrated).
   double get currentStrideM => _stride;
@@ -237,6 +274,8 @@ class PdrEngine {
     _distanceSinceFix = 0;
     _driftM = 0;
     _extraUncertaintyM = 0;
+    _vehicleBankedM = 0;
+    _vehicleSinceMs = tMs;
   }
 
   void _learn(double lat, double lng, double acc, int tMs, double? speed,
@@ -344,7 +383,7 @@ class PdrEngine {
   /// (we never guess a direction). A step with no heading adds 50% of its
   /// distance as extra uncertainty because the true direction is unknown.
   void onStep() {
-    if (_lat == null) return;
+    if (_lat == null || inVehicle) return;
     final stride = _stride;
     _distanceSinceFix += stride;
     _driftM += driftFraction * stride;
@@ -364,6 +403,8 @@ class PdrEngine {
     _lng = _lng! + stride * sin(h) / (metersPerDegLat * cos(_lat! * pi / 180));
   }
 
+  String get _contextName => context == MotionContext.unknown ? '' : context.name;
+
   LocationFix? currentFix(int nowMs) {
     if (_lat == null || _lastGpsMs == null) return null;
     if (nowMs - _lastGpsMs! <= staleAfterMs) {
@@ -374,15 +415,20 @@ class PdrEngine {
         uncertaintyM: _baseUncertaintyM,
         timeMs: _lastGpsMs!,
         generatedAtMs: nowMs,
+        context: _contextName,
       );
     }
     return LocationFix(
       lat: _lat!,
       lng: _lng!,
       source: 'estimated',
-      uncertaintyM: _baseUncertaintyM + _driftM + _extraUncertaintyM,
+      uncertaintyM: _baseUncertaintyM +
+          _driftM +
+          _extraUncertaintyM +
+          _vehicleGrowthM(nowMs),
       timeMs: _lastGpsMs!,
       generatedAtMs: nowMs,
+      context: _contextName,
     );
   }
 }

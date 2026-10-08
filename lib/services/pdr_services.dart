@@ -6,6 +6,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
+import '../logic/motion_context.dart';
 import '../logic/pdr_config.dart';
 import '../logic/pdr_engine.dart';
 
@@ -23,6 +24,11 @@ class PdrService {
   final PdrConfig config = PdrConfig();
   late final PdrEngine _engine = PdrEngine(config: config);
   int rejectedMagSamples = 0;
+
+  final MotionContextClassifier _contextClassifier = MotionContextClassifier();
+  int _lastLabelMs = 0;
+  int _lastStepMs = 0;
+  static const int _labelStaleMs = 30000;
   final StepDetector _stepDetector = StepDetector();
 
   StreamSubscription<UserAccelerometerEvent>? _linearSub;
@@ -41,6 +47,22 @@ class PdrService {
   /// path can be demonstrated indoors. Anything produced while this is on is
   /// flagged as simulated by the callers.
   bool simulateGpsLoss = false;
+
+  /// Feeds one YAMNet chunk (labels scoring >= 0.1) from the audio engine.
+  /// Without a classifier nothing is fed and the context stays unknown.
+  void onSoundLabels(List<LabelScore> labels) {
+    _lastLabelMs = _now();
+    _contextClassifier.addChunk(labels);
+    _engine.onContext(motionContext, _now());
+  }
+
+  /// Current context; unknown when YAMNet gave no chunk in the last 30 s.
+  MotionContext get motionContext {
+    final now = _now();
+    if (now - _lastLabelMs > _labelStaleMs) _contextClassifier.reset();
+    return _contextClassifier.contextAt(
+        now, _lastStepMs == 0 ? null : _lastStepMs);
+  }
 
   int get steps => _engine.steps;
   PdrEngine get engine => _engine;
@@ -62,7 +84,10 @@ class PdrService {
         samplingPeriod: SensorInterval.gameInterval,
       ).listen((e) {
         final mag = _norm(e.x, e.y, e.z);
-        if (_stepDetector.process(mag, _now())) _engine.onStep();
+        if (_stepDetector.process(mag, _now())) {
+          _lastStepMs = _now();
+          _engine.onStep();
+        }
       }, onError: (Object e) => debugPrint('PDR linear accel error: $e'));
 
       _accelSub = accelerometerEventStream(
@@ -194,7 +219,10 @@ class PdrService {
   }
 
   /// Best current location, or null when no GPS fix has ever been seen.
-  LocationFix? currentFix() => _engine.currentFix(_now());
+  LocationFix? currentFix() {
+    _engine.onContext(motionContext, _now());
+    return _engine.currentFix(_now());
+  }
 
   Future<void> stop() async {
     _running = false;
