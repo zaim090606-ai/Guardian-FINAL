@@ -12,3 +12,9 @@
 # Sensor & Speech Recognition Native Interfaces
 -keep class com.csdcorp.speech_to_text.** { *; }
 -keep class dev.fluttercommunity.plus.sensors.** { *; }
+
+# TensorFlow Lite & YAMNet
+-keep class org.tensorflow.lite.** { *; }
+-keep class org.tensorflow.lite.gpu.** { *; }
+-keepclassmembers class org.tensorflow.lite.** { *; }
+-dontwarn org.tensorflow.lite.**

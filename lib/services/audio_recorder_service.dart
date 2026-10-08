@@ -2,117 +2,175 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 class AudioRecorderService {
-  static final AudioRecorder _audioRecorder = AudioRecorder();
+  // Re-instantiate if null or closed to prevent cross-isolate state corruption
+  static AudioRecorder? _audioRecorder;
+  static String? _currentRecordingPath;
 
-  /// Captures emergency background audio evidence.
-  /// Defaults to 30 seconds for optimal upload size and context.
-  static Future<String?> captureEmergencyAudio({int durationSeconds = 30}) async {
+  static AudioRecorder _getRecorder() {
+    _audioRecorder ??= AudioRecorder();
+    return _audioRecorder!;
+  }
+
+  /// Ensures explicit runtime permissions at OS level
+  static Future<bool> checkAndRequestPermissions() async {
+    final status = await Permission.microphone.status;
+    if (status.isGranted) return true;
+    
+    final result = await Permission.microphone.request();
+    return result.isGranted;
+  }
+
+  /// Starts background audio recording (16kHz Mono WAV format for YAMNet/Whisper).
+  static Future<String?> startEmergencyAudioRecording() async {
     try {
-      // 1. Guard against double-recording if already active
-      if (await _audioRecorder.isRecording()) {
-        debugPrint("⚠️ Audio recording already in progress.");
+      final recorder = _getRecorder();
+
+      // Check if already recording
+      if (await recorder.isRecording()) {
+        debugPrint("⚠️ Audio recording already in progress: $_currentRecordingPath");
+        return _currentRecordingPath;
+      }
+
+      // Check permissions via permission_handler
+      final hasPerm = await checkAndRequestPermissions();
+      if (!hasPerm) {
+        debugPrint("❌ Audio Recording Permission Not Granted at OS level.");
         return null;
       }
 
-      // 2. Check microphone permission without launching blocking prompts
-      if (!await _audioRecorder.hasPermission()) {
-        debugPrint("❌ Audio Recording Permission Not Granted");
-        return null;
-      }
+      // Allow 800ms for hardware buffers (e.g. SpeechToText) to release mic
+      await Future.delayed(const Duration(milliseconds: 800));
 
-      // 3. Hardware Buffer: Brief delay to let SpeechToText fully release the microphone hardware
-      await Future.delayed(const Duration(milliseconds: 300));
-
-      // 4. Define target path in temporary directory
       final Directory tempDir = await getTemporaryDirectory();
       final String filePath =
-          '${tempDir.path}/sos_audio_${DateTime.now().millisecondsSinceEpoch}.m4a';
+          '${tempDir.path}/sos_audio_${DateTime.now().millisecondsSinceEpoch}.wav';
 
-      debugPrint("🎙️ Starting emergency audio recording ($durationSeconds seconds)...");
+      debugPrint("🎙️ Starting 16kHz WAV emergency audio recording...");
 
-      // 5. Start recording (64kbps AAC-LC offers clear voice quality at half the file size)
-      await _audioRecorder.start(
+      await recorder.start(
         const RecordConfig(
-          encoder: AudioEncoder.aacLc,
-          bitRate: 64000, 
-          sampleRate: 16000, // Optimized for voice clarity
+          encoder: AudioEncoder.wav,        // Linear PCM WAV
+          sampleRate: 16000,                 // 16kHz required for YAMNet & Whisper
+          numChannels: 1,                    // Mono
+          androidConfig: AndroidRecordConfig(
+            audioSource: AndroidAudioSource.voiceRecognition, // Best for AI models & background capture
+          ),
         ),
         path: filePath,
       );
 
-      // 6. Record for specified duration
-      await Future.delayed(Duration(seconds: durationSeconds));
-
-      // 7. Stop recording and verify file exists
-      final String? savedPath = await _audioRecorder.stop();
-
-      if (savedPath != null && await File(savedPath).exists()) {
-        debugPrint("✅ 30-Second Audio evidence saved locally: $savedPath");
-        return savedPath;
-      } else {
-        debugPrint("❌ Audio file was not saved properly.");
-        return null;
-      }
+      _currentRecordingPath = filePath;
+      debugPrint("✅ Recording successfully started at: $filePath");
+      return filePath;
     } catch (e) {
-      debugPrint("❌ Exception recording emergency audio: $e");
+      debugPrint("❌ Exception starting emergency audio: $e");
+      // Reset recorder instance on hardware crash
+      await disposeRecorder();
       return null;
     }
   }
 
-  /// Uploads a recorded audio file to Firebase Storage under `/emergency_audio/{userId}/{filename}`
-  /// and returns the downloadable URL.
-  static Future<String?> uploadAudioToFirebase(String filePath) async {
+  /// Stops ongoing recording and returns verified file path.
+  static Future<String?> stopEmergencyAudioRecording() async {
     try {
-      final File file = File(filePath);
-      if (!await file.exists()) {
-        debugPrint("❌ File does not exist for upload: $filePath");
-        return null;
-      }
+      if (_audioRecorder == null) return null;
 
+      if (await _audioRecorder!.isRecording()) {
+        final String? savedPath = await _audioRecorder!.stop();
+        final String? returnPath = savedPath ?? _currentRecordingPath;
+        _currentRecordingPath = null;
+
+        if (returnPath != null && await File(returnPath).exists()) {
+          final int fileSize = await File(returnPath).length();
+          debugPrint("✅ Audio evidence saved ($fileSize bytes): $returnPath");
+          
+          if (fileSize == 0) {
+            debugPrint("⚠️ Warning: Recorded audio file is 0 bytes!");
+            return null;
+          }
+          return returnPath;
+        }
+      }
+      return null;
+    } catch (e) {
+      debugPrint("❌ Exception stopping emergency audio: $e");
+      return null;
+    }
+  }
+
+  /// Captures emergency audio for a fixed duration.
+  static Future<String?> captureEmergencyAudio({int durationSeconds = 30}) async {
+    final String? path = await startEmergencyAudioRecording();
+    if (path == null) return null;
+
+    await Future.delayed(Duration(seconds: durationSeconds));
+    return await stopEmergencyAudioRecording();
+  }
+
+  /// Uploads audio file to Firebase Storage. Preserves local file if offline.
+  static Future<String?> uploadAudioToFirebase(String filePath) async {
+    final File file = File(filePath);
+    if (!await file.exists()) {
+      debugPrint("❌ File does not exist for upload: $filePath");
+      return null;
+    }
+
+    try {
       final String userId = FirebaseAuth.instance.currentUser?.uid ?? "anonymous_user";
-      final String fileName = "sos_${DateTime.now().millisecondsSinceEpoch}.m4a";
+      final String fileName = "sos_${DateTime.now().millisecondsSinceEpoch}.wav";
       final Reference storageRef = FirebaseStorage.instance
           .ref()
           .child('emergency_audio')
           .child(userId)
           .child(fileName);
 
-      debugPrint("☁️ Uploading audio evidence to Firebase Storage...");
+      debugPrint("☁️ Uploading WAV audio evidence to Firebase Storage...");
       final UploadTask uploadTask = storageRef.putFile(
         file,
-        SettableMetadata(contentType: 'audio/mp4'),
+        SettableMetadata(contentType: 'audio/wav'),
       );
 
       final TaskSnapshot snapshot = await uploadTask;
       final String downloadUrl = await snapshot.ref.getDownloadURL();
-      
+
       debugPrint("✅ Audio uploaded successfully! URL: $downloadUrl");
 
-      // Cleanup local temp file post-upload
       if (await file.exists()) {
         await file.delete();
       }
 
       return downloadUrl;
     } catch (e) {
-      debugPrint("❌ Exception uploading audio to Firebase Storage: $e");
-      return null;
+      debugPrint("⚠️ Upload failed (offline/network). Retaining file for store-and-forward: $e");
+      return filePath;
     }
   }
 
-  /// Force stop recording if an emergency is cancelled by user
+  /// Safely cancel and release hardware recorder instance
   static Future<void> cancelRecording() async {
     try {
-      if (await _audioRecorder.isRecording()) {
-        await _audioRecorder.stop();
+      if (_audioRecorder != null && await _audioRecorder!.isRecording()) {
+        await _audioRecorder!.stop();
+        _currentRecordingPath = null;
         debugPrint("⏹️ Emergency audio recording cancelled.");
       }
     } catch (e) {
-      debugPrint("❌ Error stopping recorder: $e");
+      debugPrint("❌ Error cancelling recorder: $e");
+    } finally {
+      await disposeRecorder();
     }
+  }
+
+  /// Dispose recorder instance to free hardware memory
+  static Future<void> disposeRecorder() async {
+    try {
+      await _audioRecorder?.dispose();
+    } catch (_) {}
+    _audioRecorder = null;
   }
 }

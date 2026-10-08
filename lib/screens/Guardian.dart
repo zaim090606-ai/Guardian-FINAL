@@ -103,7 +103,7 @@ class _MakeGuardianReadyScreenState extends State<MakeGuardianReadyScreen> {
   Future<void> _requestSmsPermission() async {
     PermissionStatus status = await Permission.sms.request();
     if (status.isGranted) {
-      if (context.mounted) {Remove-Item .\gitwork.git
+      if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('SMS permission allowed!')),
         );

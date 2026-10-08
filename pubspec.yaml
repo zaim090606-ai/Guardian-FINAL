@@ -23,8 +23,8 @@ dependencies:
   sensors_plus: ^5.0.1
   geolocator: ^14.0.3
   google_maps_flutter: ^2.5.3
-
-  # --- Utilities, AI & Communication ---
+  flutter_riverpod: ^2.6.1
+  # --- Utilities, AI, Mesh & Communication ---
   http: ^1.2.2
   permission_handler: ^11.4.0
   url_launcher: ^6.3.2
@@ -32,9 +32,15 @@ dependencies:
   fast_contacts: ^6.0.0
   speech_to_text: ^7.4.0
   google_generative_ai: ^0.4.7
+  nearby_connections: ^4.2.1
+  connectivity_plus: ^6.0.0
+
+  # --- Local Offline AI Stack ---
+  tflite_flutter: ^0.11.0
+  whisper_ggml_plus: ^1.5.2
 
   # --- Audio & File System ---
-  record: ^7.1.1
+  record: ^5.0.4
   path_provider: ^2.1.2
 
   # --- UI Icons & Notifications ---
@@ -46,5 +52,18 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^6.0.0
 
+dependency_overrides:
+  record_platform_interface: 1.5.0
+  record_linux: 0.7.0
+  record_web: 1.2.0
+  record_windows: 1.0.6
+
 flutter:
   uses-material-design: true
+
+  # Folder & explicit model assets for 100% offline edge execution
+  assets:
+    - assets/models/
+    - assets/models/yamnet.tflite
+    - assets/models/yamnet_labels.txt
+    - assets/models/ggml-tiny.bin
