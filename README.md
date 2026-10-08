@@ -40,6 +40,9 @@ Secrets are not stored in the repo.
    Without a key the Gemini features return no result.
 2. **Maps key (Android)**: append `MAPS_API_KEY=<your key>` to `android/local.properties` (do not overwrite the file Flutter generates). `local.properties.example` is a reference. The Gradle build injects the value into the manifest as `${MAPS_API_KEY}`.
 
+## Diagnostics and phone testing
+The home screen has a Diagnostics page (location source, dead reckoning, relay counters, SOS attempt log, audio status). [PHONE_TEST.md](PHONE_TEST.md) lists the one-phone and two-phone checks, and [STATUS_26206.md](STATUS_26206.md) says what is proven and what still needs a device.
+
 ## Tests
 ```bash
 flutter test
