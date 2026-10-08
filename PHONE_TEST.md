@@ -31,12 +31,12 @@ Open **Diagnostics** from the monitor icon at the top right of the home screen. 
 
 ## Two phones (A offline, B online)
 
-Both phones need the app installed, permissions granted, and Bluetooth and Wi-Fi switched on. Keep them within 2 m. Make sure the foreground notification "Guardian Safety Active" is showing on both.
+Both phones need the app installed, permissions granted, and Bluetooth, Wi-Fi and Location switched on (see "Airplane mode and relay tests" below). Keep them within a few metres. Make sure the foreground notification "Guardian Safety Active" is showing on both.
 
 | # | Step | Expected result | Pass/Fail |
 |---|------|-----------------|-----------|
 | 15 | Phone B: online, open Diagnostics. | Relay state shows `discovering`. | [ ] Pass [ ] Fail |
-| 16 | Phone A: switch off Wi-Fi and mobile data (keep Bluetooth on). | Phone A has no internet. | [ ] Pass [ ] Fail |
+| 16 | Phone A: disable mobile data and Wi-Fi internet (do NOT use airplane mode; keep Bluetooth, the Wi-Fi radio and Location on). | Phone A has no internet. | [ ] Pass [ ] Fail |
 | 17 | Phone A: Diagnostics, press **Send test SOS via relay (SIMULATED)**. | A shows `advertising` and then "Sent test-... to a peer"; Sent counter goes up. | [ ] Pass [ ] Fail |
 | 18 | Phone B: watch Diagnostics for up to 60 s. | Peers found 1 or more, Received 1, Uploaded 1. A notification "Emergency signal received" appears. | [ ] Pass [ ] Fail |
 | 19 | Firebase console, collection `emergency_logs`. | A document with id `test-...`, `relayedByMesh: true`, `simulated: true`, `status: test` exists. | [ ] Pass [ ] Fail |
@@ -47,5 +47,56 @@ Both phones need the app installed, permissions granted, and Bluetooth and Wi-Fi
 
 Notes for the tester
 - Nearby Connections needs the Nearby/Bluetooth permissions granted on Android 12+. If Relay state stays `idle`, check them in Settings > Apps > Guardian.
-- Step 6 (offline SMS) needs a SIM with mobile signal. Full airplane mode also blocks SMS, so test it with data off instead.
+- Step 6 (offline SMS) needs a SIM with mobile signal. Full airplane mode also blocks SMS (and switches off Bluetooth and Wi-Fi), so test it with data off instead.
 - Record the Diagnostics attempt log and event list as evidence for each pass or fail.
+
+## Airplane mode and relay tests (read before the two-phone tests)
+
+Airplane mode switches off Bluetooth and Wi-Fi as well as mobile data, so the Nearby Connections relay cannot work in it. For every relay test do one of these instead:
+
+- Disable **mobile data** and **Wi-Fi internet** (for example by turning Wi-Fi off, or connecting to a Wi-Fi network with no internet) while leaving Bluetooth, Wi-Fi radio and Location switched on; or
+- If you did use airplane mode, switch **Bluetooth, Wi-Fi and Location** back on afterwards, before starting the test.
+
+Keep both phones within a few metres of each other during all relay and anchor tests.
+
+## PDR field experiment (outdoors, open area)
+
+Goal: measure how much the PDR improvements reduce the position error. Use an open area with a clear sky and at least 150 m of straight walking space and room for a 90-degree turn. Hold the phone flat in your hand, top edge pointing the way you walk, for the whole run. Do not put it in a pocket.
+
+For each run:
+
+1. Diagnostics: set the flags (**All OFF** or **All ON** button). Note: switching a flag changes behaviour for the next run, so set them before you start walking.
+2. Stand outside with GPS good for the first 30 s while walking normally (this is when the engine learns the compass offset and stride).
+3. Turn **Simulate GPS loss** ON. The ground-truth meter now compares the estimate with the real GPS silently.
+4. Walk 100 m straight, make a 90-degree turn, walk 50 m more. Stop.
+5. Screenshot the "Dead-reckoning error vs real GPS" card (it contains the run summary and the flag state). Turn Simulate GPS loss OFF.
+6. Copy the final error and the percentage into the results table in `PDR_FUSION.md`. Do not enter numbers you did not see.
+
+Do three runs with all flags OFF and three runs with all flags ON, alternating if possible (OFF, ON, OFF, ON, ...).
+
+| Run | Flags | Final error (m) | Error (%) | Pass/Fail (ON clearly better than OFF on average) |
+|---|---|---|---|---|
+| 1-3 | OFF | see PDR_FUSION.md | | [ ] Pass [ ] Fail |
+| 4-6 | ON | see PDR_FUSION.md | | [ ] Pass [ ] Fail |
+
+## Anchor test (two phones)
+
+| # | Step | Expected result | Pass/Fail |
+|---|------|-----------------|-----------|
+| A1 | Phone A (sender): outdoors, GPS good for 30 s, then **Simulate GPS loss** ON and walk about 60 m. Phone B (helper): good GPS, no simulation, standing still, app open in the background. | A shows source ESTIMATED with a growing radius. | [ ] Pass [ ] Fail |
+| A2 | Phone A: press the SOS button (this starts the relay offer). Walk towards phone B until the phones are within a few metres. | B's event list shows "Offered an anchor beacon to the sender". A's event list shows "Anchor beacon used: radius X -> Y m". | [ ] Pass [ ] Fail |
+| A3 | Phone A: Diagnostics, "Motion context and anchors". | Last anchor shows an age of a few seconds, a radius after that is smaller than before (or equal to the 20 m minimum), and "snapped" or "weighted". | [ ] Pass [ ] Fail |
+| A4 | Phone B: turn on **Simulate GPS loss** and repeat A2. | B offers NO beacon ("No anchor beacon offered"). A's anchor is unchanged. | [ ] Pass [ ] Fail |
+| A5 | Single phone: with Simulate GPS loss ON press **Send test anchor (SIMULATED beacon)**. | The anchor row is labelled SIMULATED. This tests the screen only, not the radio path. | [ ] Pass [ ] Fail |
+
+## Vehicle context test (sound clip, not a real drive)
+
+Do not do this in a real vehicle. This only checks that the microphone context reacts to engine and traffic sound.
+
+| # | Step | Expected result | Pass/Fail |
+|---|------|-----------------|-----------|
+| V1 | Diagnostics: confirm "YAMNet model: loaded" and "Microphone" is not denied. Note "Steps counted". | Motion context reads walking or stationary. | [ ] Pass [ ] Fail |
+| V2 | Play a recording of an engine / road traffic (loud, clear) from another device 20 cm from the phone for at least 10 s while shaking the phone gently as if walking. | Motion context becomes **vehicle** after about 3 s of sound. | [ ] Pass [ ] Fail |
+| V3 | While the context is vehicle (and GPS loss is SIMULATED so the estimate is shown), keep shaking the phone. | "Steps counted" does NOT increase. The uncertainty grows with time (about 8 m per second, capped at 2000 m). | [ ] Pass [ ] Fail |
+| V4 | Stop the sound and wait about 5 s. | Context leaves vehicle after about 3 s of non-vehicle sound; steps count again. | [ ] Pass [ ] Fail |
+| V5 | Turn **Microphone context** OFF and repeat V2. | Context stays unknown; steps keep counting. | [ ] Pass [ ] Fail |

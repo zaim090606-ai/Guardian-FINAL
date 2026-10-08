@@ -215,6 +215,20 @@ void main() {
           contains('https://maps.google.com/?q=28.5,77.1'));
     });
 
+    test('estimated fix shows the age of the last GPS fix, GPS fix does not',
+        () {
+      String t(String source, int? age) => buildSosText(
+          trackingUrl: 'https://h.web.app/alert/ID',
+          lat: 28.5,
+          lng: 77.1,
+          source: source,
+          uncertaintyM: 30,
+          trigger: 'x',
+          fixAgeS: age);
+      expect(t('estimated', 150), contains('last GPS fix 2 min ago'));
+      expect(t('gps', 150), isNot(contains('last GPS fix')));
+    });
+
     test('contains both links and the trigger', () {
       final t = text();
       expect(t, contains('Tracking: https://h.web.app/alert/ID'));

@@ -1,5 +1,6 @@
 import 'dart:math';
 
+import 'package:easy_help/logic/anchor_beacon.dart';
 import 'package:easy_help/logic/pdr_config.dart';
 import 'package:easy_help/logic/pdr_engine.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -38,6 +39,7 @@ class Walker {
 }
 
 void main() {
+  simulationTests();
   group('magnetometer gating', () {
     test('accepts 25-65 uT, rejects outside', () {
       expect(magneticFieldPlausible(30, 0, 0), isTrue);
@@ -160,5 +162,42 @@ void main() {
       Walker(e).walk(150, 30);
       expect(e.driftFraction, 0.15);
     });
+  });
+}
+
+// SIMULATION: a model check on synthetic data, NOT a field measurement.
+void simulationTests() {
+  test('SIMULATION: 200 m walk with a 10 degree heading bias', () {
+    double run(PdrConfig cfg, {bool anchorMid = false}) {
+      final e = PdrEngine(config: cfg);
+      e.onGravity(0, 0, 9.8);
+      final w = Walker(e, compassBias: 10, trueStride: 0.7);
+      w.walk(56, 60); // about 40 s with good GPS: the engine learns
+      for (int i = 0; i < 2; i++) {
+        w.walk(1.4, 60, gps: false); // let GPS go stale (> 8 s)
+      }
+      w.walk(60, 60, gps: false);
+      w.walk(40, 60, gps: false);
+      if (anchorMid) {
+        // a nearby phone with good GPS stands at the true position
+        e.onAnchor(
+            AnchorBeacon(
+                lat: w.lat, lng: w.lng, accuracyM: 10, timestampMs: w.t),
+            w.t);
+      }
+      w.walk(200 - w.walked, 60, gps: false);
+      return w.errorM(e);
+    }
+
+    final plain = run(PdrConfig.allOff());
+    final learned = run(PdrConfig.allOff()..headingOffset = true);
+    final anchored = run(PdrConfig.allOff()..anchors = true, anchorMid: true);
+    // ignore: avoid_print
+    print('SIMULATION (model check): plain ${plain.toStringAsFixed(1)} m, '
+        'learned offset ${learned.toStringAsFixed(1)} m, '
+        'mid-walk anchor ${anchored.toStringAsFixed(1)} m');
+    expect(plain, greaterThan(10)); // the bias really hurts
+    expect(learned, lessThan(plain));
+    expect(anchored, lessThan(plain));
   });
 }
