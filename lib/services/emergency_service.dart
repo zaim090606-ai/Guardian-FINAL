@@ -88,6 +88,7 @@ class EmergencyService {
 
     final docId = started.id;
     bool dispatched = false;
+    Timer? beat;
     try {
       _activeId = docId;
       _session = SosSession(guard);
@@ -159,6 +160,9 @@ class EmergencyService {
         };
       }
 
+      // Keeps the guard fresh while the channels run (up to ~30 s).
+      beat = Timer.periodic(const Duration(seconds: 10), (_) =>
+          unawaited(guard.heartbeat(docId, DateTime.now().millisecondsSinceEpoch)));
       final dispatcher = SosDispatcher(onAttempt: (a) => _recordAttempt(docId, a));
       final attempts = await dispatcher.dispatch(
         sosId: docId,
@@ -166,6 +170,7 @@ class EmergencyService {
         sms: () => _sendSms(text, contacts),
         mesh: () => meshOffer(packet),
       );
+      beat.cancel();
       dispatched = attempts.any((a) => a.ok);
       debugPrint('[GUARDIAN_LOG] SOS $docId result: '
           '${attempts.map((a) => "${a.channel}=${a.ok ? "ok" : "fail"}").join(", ")}');
@@ -195,6 +200,7 @@ class EmergencyService {
     } catch (e) {
       debugPrint('Error during emergency dispatch: $e');
     } finally {
+      beat?.cancel();
       // No channel worked: free the guard so the user can try again.
       if (!dispatched) await stopLocal();
     }
@@ -411,6 +417,7 @@ class EmergencyService {
   static void _startLiveTracking(String docId) {
     _stopTimers();
     _liveTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+      unawaited(guard.heartbeat(docId, DateTime.now().millisecondsSinceEpoch));
       final fix = await locationNow();
       if (fix == null) return;
       final simulated = await _simulatedNow();
