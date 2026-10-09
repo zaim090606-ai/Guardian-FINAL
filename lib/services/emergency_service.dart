@@ -12,6 +12,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../logic/alert_schema.dart';
 import '../logic/pdr_engine.dart';
 import '../logic/pdr_snapshot.dart';
 import '../logic/sos_dispatcher.dart';
@@ -19,6 +20,7 @@ import '../logic/sos_guard.dart';
 import '../logic/sos_packet.dart';
 import 'ai_service.dart';
 import 'audio_recorder_service.dart';
+import 'auth_service.dart';
 import 'diagnostics_hub.dart';
 import 'pdr_services.dart';
 import 'mesh_receiver_service.dart';
@@ -125,8 +127,9 @@ class EmergencyService {
       Map<String, dynamic> docData() {
         // Firebase objects are touched only here, inside the cloud channel.
         final user = FirebaseAuth.instance.currentUser;
+        // The owner's uid is added when the document is written; personal
+        // fields (phone, transcript, audio) go to the private document.
         return <String, dynamic>{
-          'userId': user?.uid ?? 'anonymous',
           'userPhone': user?.phoneNumber ?? 'unknown',
           'eventType': audioTranscript.isNotEmpty ? 'voice_trigger' : 'sensor_trigger',
           'riskLevel': level,
@@ -147,7 +150,6 @@ class EmergencyService {
           'locationSimulated': simulated,
           'status': 'triggered',
           'audioStatus': micGranted ? 'processing' : 'unavailable',
-          'audioUrl': null,
           'timestamp': FieldValue.serverTimestamp(),
         };
       }
@@ -224,16 +226,39 @@ class EmergencyService {
     Map<String, dynamic> Function() buildData,
   ) async {
     final data = buildData();
+    final uid = await AuthService.ensureUid();
+    if (uid == null) {
+      // Never write a made-up owner: keep the alert and send it after sign-in.
+      await AuthService.savePending(docId, data);
+      AuthService.startRetryLoop();
+      throw StateError('not signed in (alert kept, will be sent after sign-in)');
+    }
     final conn = await Connectivity().checkConnectivity();
     if (conn.contains(ConnectivityResult.none)) {
       unawaited(_mergeIntoDoc(docId, data));
       throw StateError('no network connection (write queued locally)');
     }
-    await FirebaseFirestore.instance
-        .collection('emergency_logs')
-        .doc(docId)
-        .set(data, SetOptions(merge: true));
+    await _writeAlert(docId, data, uid);
     return true;
+  }
+
+  /// Writes the public document, then the private one (best effort).
+  static Future<void> _writeAlert(
+      String docId, Map<String, dynamic> data, String uid) async {
+    final parts = AlertSchema.split(data, uid);
+    final ref = FirebaseFirestore.instance.collection('emergency_logs').doc(docId);
+    await ref.set(parts.public, SetOptions(merge: true));
+    if (parts.private.length > 1) {
+      try {
+        await ref
+            .collection('private')
+            .doc('details')
+            .set(parts.private, SetOptions(merge: true))
+            .timeout(const Duration(seconds: 10));
+      } catch (e) {
+        debugPrint('Private alert details skipped: $e');
+      }
+    }
   }
 
   /// SMS channel: native multipart first, background_sms as backup. Succeeds
@@ -547,16 +572,20 @@ class EmergencyService {
     return AttemptLog.decode(prefs.getString(_attemptLogKey)).items;
   }
 
+  /// Merges fields into the alert. Public fields go to emergency_logs/<id>
+  /// and personal ones to its private document; every write carries the
+  /// owner's uid. Skipped (and logged) when the phone is not signed in.
   static Future<void> _mergeIntoDoc(
     String docId,
     Map<String, dynamic> data,
   ) async {
     try {
-      await FirebaseFirestore.instance
-          .collection('emergency_logs')
-          .doc(docId)
-          .set(data, SetOptions(merge: true))
-          .timeout(const Duration(seconds: 10));
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid == null) {
+        debugPrint('Firestore merge skipped: not signed in');
+        return;
+      }
+      await _writeAlert(docId, data, uid).timeout(const Duration(seconds: 10));
     } catch (e) {
       debugPrint('Firestore merge skipped: $e');
     }

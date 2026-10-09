@@ -9,6 +9,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../logic/advertising_controller.dart';
 import '../logic/anchor_beacon.dart';
+import '../logic/sos_guard.dart' show generateAlertId;
 import '../logic/sos_packet.dart';
 import 'diagnostics_hub.dart';
 
@@ -176,7 +177,7 @@ class RelayService {
   Future<bool> sendTestPacket({double lat = 0, double lng = 0}) {
     final now = DateTime.now().millisecondsSinceEpoch;
     return broadcast(SosPacket(
-      id: 'test-$now',
+      id: 'test-${generateAlertId()}',
       lat: lat,
       lng: lng,
       source: lat == 0 && lng == 0 ? 'unknown' : 'gps',

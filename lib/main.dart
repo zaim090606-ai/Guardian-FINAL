@@ -18,6 +18,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'firebase_options.dart';
 import 'navbar/navbar.dart';
 import 'screens/firstscreen.dart';
+import 'services/auth_service.dart';
 import 'services/diagnostics_hub.dart';
 import 'services/emergency_service.dart';
 import 'services/mesh_receiver_service.dart';
@@ -40,6 +41,7 @@ Future<void> main() async {
     );
     await FirebaseAuth.instance.signInAnonymously();
   } catch (e) {
+    AuthService.startRetryLoop();
     // The app still works offline (SMS, mesh, local detection) without Firebase.
     debugPrint('Firebase setup incomplete: $e');
   }
@@ -195,6 +197,7 @@ void onStartService(ServiceInstance service) async {
     await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
     await FirebaseAuth.instance.signInAnonymously();
   } catch (e) {
+    AuthService.startRetryLoop();
     debugPrint('Service: Firebase unavailable, offline paths only: $e');
   }
 

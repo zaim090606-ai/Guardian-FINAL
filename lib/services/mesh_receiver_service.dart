@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../logic/relay_policy.dart';
 import '../logic/sos_packet.dart';
+import 'auth_service.dart';
 import 'diagnostics_hub.dart';
 import 'relay_service.dart';
 
@@ -225,6 +226,8 @@ class MeshReceiverService {
     final conn = await Connectivity().checkConnectivity();
     if (conn.contains(ConnectivityResult.none)) return false;
     try {
+      final uid = await AuthService.ensureUid();
+      if (uid == null) return false; // not signed in: stays queued, retried
       final ref = FirebaseFirestore.instance.collection('emergency_logs').doc(p.id);
       await FirebaseFirestore.instance.runTransaction((tx) async {
         final snap = await tx.get(ref);
@@ -237,8 +240,12 @@ class MeshReceiverService {
           // The origin already uploaded this alert; only note the relay.
           tx.update(ref, relayInfo);
         } else {
+          // Created by the relayer: owned by its uid and marked relayed, so
+          // afterwards only the relay keys can change.
           tx.set(ref, {
             ...relayInfo,
+            'userId': uid,
+            'relayed': true,
             'latitude': p.lat,
             'longitude': p.lng,
             'locationSource': p.source,
