@@ -9,7 +9,6 @@ import 'package:permission_handler/permission_handler.dart';
 import '../logic/anchor_beacon.dart';
 import '../logic/sos_packet.dart';
 import 'diagnostics_hub.dart';
-import 'pdr_services.dart';
 
 /// Sender side of the offline mesh: advertises over Nearby Connections and
 /// hands the SOS packet to every Guardian device that connects.
@@ -51,6 +50,8 @@ class RelayService {
     try {
       if (!await hasMeshPermissions()) {
         debugPrint('Mesh relay: Bluetooth/Location permission missing.');
+        DiagnosticsHub.instance.relayUnavailableReason =
+            'Bluetooth / Nearby / Location permission missing';
         return false;
       }
 
@@ -95,6 +96,8 @@ class RelayService {
 
       _advertising = started;
       DiagnosticsHub.instance.advertising = started;
+      DiagnosticsHub.instance.relayUnavailableReason =
+          started ? null : 'advertising could not start';
       DiagnosticsHub.instance.relayEvent(
           started ? 'Advertising SOS to nearby phones' : 'Advertising failed');
       debugPrint('Mesh relay advertising: $started');
@@ -102,6 +105,7 @@ class RelayService {
     } catch (e) {
       debugPrint('Mesh relay error: $e');
       _advertising = false;
+      DiagnosticsHub.instance.relayUnavailableReason = 'Nearby error: $e';
       return false;
     }
   }
@@ -116,11 +120,10 @@ class RelayService {
       final now = DateTime.now().millisecondsSinceEpoch;
       final b = parseBeacon(utf8.decode(bytes), now);
       if (b == null) return;
-      final e = PdrService().onAnchor(b);
+      // The service isolate owns PDR; whether the beacon is used shows up in
+      // its Diagnostics snapshot ("Last anchor").
       DiagnosticsHub.instance.forwardAnchor(b);
-      DiagnosticsHub.instance.relayEvent(e == null
-          ? 'Anchor beacon received (not used: GPS fresh or expired)'
-          : 'Anchor beacon used: radius ${e.radiusBeforeM.round()} -> ${e.radiusAfterM.round()} m');
+      DiagnosticsHub.instance.relayEvent('Anchor beacon received, passed to PDR');
     } catch (e) {
       debugPrint('Mesh relay beacon handling failed: $e');
     }

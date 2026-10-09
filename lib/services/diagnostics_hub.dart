@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
@@ -8,9 +7,10 @@ import '../logic/anchor_beacon.dart';
 import '../logic/countdown.dart';
 import 'pdr_services.dart';
 
-/// Live counters for the Diagnostics screen. The relay and audio engines run
-/// in the foreground-service isolate, which publishes a snapshot every two
-/// seconds; the UI isolate listens and shows the latest one.
+/// Live counters for the Diagnostics screen. Relay counters are measured in
+/// the UI isolate (Nearby Connections needs the Activity). The audio and PDR
+/// engines run in the foreground-service isolate, which publishes a snapshot
+/// every two seconds; the UI isolate listens and shows the latest one.
 class DiagnosticsHub {
   static final DiagnosticsHub instance = DiagnosticsHub._();
   DiagnosticsHub._();
@@ -25,13 +25,22 @@ class DiagnosticsHub {
   bool discovering = false;
   int connectedPeers = 0;
 
-  String get relayState => connectedPeers > 0
-      ? 'connected'
-      : advertising
-          ? 'advertising'
-          : discovering
-              ? 'discovering'
-              : 'idle';
+  /// Why Nearby Connections could not start (UI isolate), or null.
+  String? relayUnavailableReason;
+
+  /// Only states that were measured: "connected" needs a counted peer.
+  String get relayState => relayUnavailableReason != null &&
+          !advertising &&
+          !discovering &&
+          connectedPeers == 0
+      ? 'unavailable'
+      : connectedPeers > 0
+          ? 'connected'
+          : advertising
+              ? 'advertising'
+              : discovering
+                  ? 'discovering'
+                  : 'idle';
   int peersFound = 0;
   int sent = 0;
   int received = 0;
@@ -47,13 +56,12 @@ class DiagnosticsHub {
   int lastDetectionMs = 0;
 
   Timer? _timer;
-  ServiceInstance? _service;
 
-  /// Service isolate: tell the UI isolate's PDR about a beacon too, so an SOS
-  /// raised from the UI side also benefits from it.
+  /// UI isolate: hands a beacon received over Nearby to the PDR owner (the
+  /// service isolate).
   void forwardAnchor(AnchorBeacon b) {
     try {
-      _service?.invoke('anchor', b.toJson());
+      FlutterBackgroundService().invoke('anchor_beacon', b.toJson());
     } catch (_) {}
   }
 
@@ -61,14 +69,6 @@ class DiagnosticsHub {
       relayEvents.add(text, DateTime.now().millisecondsSinceEpoch);
 
   Map<String, dynamic> snapshot() => {
-        'relayState': relayState,
-        'peersFound': peersFound,
-        'sent': sent,
-        'received': received,
-        'queued': queued,
-        'uploaded': uploaded,
-        'pending': pending,
-        'events': relayEvents.toJson(),
         'yamnetLoaded': yamnetLoaded,
         'whisperLoaded': whisperLoaded,
         'micStatus': micStatus,
@@ -80,7 +80,6 @@ class DiagnosticsHub {
 
   /// Service isolate: push snapshots to the UI.
   void startPublishing(ServiceInstance service) {
-    _service = service;
     _timer?.cancel();
     _timer = Timer.periodic(const Duration(seconds: 2), (_) {
       try {
@@ -92,11 +91,6 @@ class DiagnosticsHub {
   /// UI isolate: listen for snapshots.
   static void listen() {
     try {
-      FlutterBackgroundService().on('anchor').listen((event) {
-        if (event == null) return;
-        final b = parseBeacon(jsonEncode(event), DateTime.now().millisecondsSinceEpoch);
-        if (b != null) PdrService().onAnchor(b);
-      });
       FlutterBackgroundService().on('diag').listen((event) {
         if (event != null) remote.value = Map<String, dynamic>.from(event);
       });

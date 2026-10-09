@@ -10,6 +10,7 @@ import '../logic/sos_dispatcher.dart';
 import '../services/diagnostics_hub.dart';
 import '../services/emergency_service.dart';
 import '../services/pdr_services.dart';
+import '../services/relay_service.dart';
 
 /// Shows what the offline features are doing right now so they can be checked
 /// on a single phone. Anything triggered from here is labelled SIMULATED.
@@ -98,11 +99,14 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
 
   Future<void> _sendTestRelay() async {
     try {
-      FlutterBackgroundService().invoke('send_test_relay');
-      setState(() => _testMessage =
-          'SIMULATED test packet offered to nearby phones at ${_clock(DateTime.now().millisecondsSinceEpoch)}');
+      final fix = PdrService().currentFix();
+      final ok = await RelayService()
+          .sendTestPacket(lat: fix?.lat ?? 0, lng: fix?.lng ?? 0);
+      setState(() => _testMessage = ok
+          ? 'SIMULATED test packet offered to nearby phones at ${_clock(DateTime.now().millisecondsSinceEpoch)}'
+          : 'Relay unavailable: ${DiagnosticsHub.instance.relayUnavailableReason ?? "advertising did not start"}');
     } catch (e) {
-      setState(() => _testMessage = 'Could not reach the background service: $e');
+      setState(() => _testMessage = 'Relay unavailable: $e');
     }
   }
 
@@ -118,6 +122,7 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
     final fix = pdr.currentFix();
     final simulated = pdr.simulateGpsLoss;
     final remote = DiagnosticsHub.remote.value;
+    final hub = DiagnosticsHub.instance;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Diagnostics')),
@@ -148,11 +153,16 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
           _section('PDR improvements', _flags(pdr)),
           _section('Motion context and anchors', _contextAndAnchors(pdr, remote)),
           _section('Mesh relay', [
-            _row('State', '${remote['relayState'] ?? 'service not reporting'}'),
-            _row('Peers found', '${remote['peersFound'] ?? 0}'),
-            _row('Sent / received', '${remote['sent'] ?? 0} / ${remote['received'] ?? 0}'),
+            _row('State', hub.relayState),
+            if (hub.relayUnavailableReason != null)
+              Text('Reason: ${hub.relayUnavailableReason}',
+                  style: TextStyle(fontSize: 12, color: Colors.red.shade800)),
+            const Text('Relay works while the app is open or alive in recents.',
+                style: TextStyle(fontSize: 11)),
+            _row('Peers found', '${hub.peersFound}'),
+            _row('Sent / received', '${hub.sent} / ${hub.received}'),
             _row('Queued / uploaded / waiting',
-                '${remote['queued'] ?? 0} / ${remote['uploaded'] ?? 0} / ${remote['pending'] ?? 0}'),
+                '${hub.queued} / ${hub.uploaded} / ${hub.pending}'),
             const SizedBox(height: 8),
             OutlinedButton(
               onPressed: _sendTestRelay,
@@ -165,7 +175,7 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
               ),
             const SizedBox(height: 8),
             const Text('Last 10 events', style: TextStyle(fontWeight: FontWeight.bold)),
-            ..._events(remote),
+            ..._events(hub.relayEvents.toJson()),
           ]),
           _section('SOS send attempts', [
             if (_attempts.isEmpty) const Text('No SOS has been sent yet.'),
@@ -307,8 +317,7 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
         _ => c,
       };
 
-  List<Widget> _events(Map<String, dynamic> remote) {
-    final events = remote['events'];
+  List<Widget> _events(Object? events) {
     if (events is! List || events.isEmpty) {
       return [const Text('none yet', style: TextStyle(fontSize: 12))];
     }

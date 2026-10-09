@@ -31,6 +31,15 @@ class EmergencyService {
   static const String _trackingBase = 'https://guardian-b7926.web.app';
   static const MethodChannel _smsChannel = MethodChannel('com.guardian.app/sms');
 
+  /// How the mesh channel hands a packet to the relay. In the UI isolate
+  /// (default) it advertises directly. The service isolate replaces it with a
+  /// bridge, because Nearby Connections only works with an Activity.
+  static Future<bool> Function(SosPacket) meshOffer = (packet) {
+    // Our own packet must never be processed again if it bounces back.
+    MeshReceiverService().markOwnPacket(packet.id);
+    return RelayService().broadcast(packet);
+  };
+
   static bool _isDispatching = false;
   static DocumentReference<Map<String, dynamic>>? _activeDoc;
   static Timer? _liveTimer;
@@ -125,11 +134,7 @@ class EmergencyService {
         sosId: docId,
         cloud: () => _uploadAlert(docRef, docData),
         sms: () => _sendSms(text, contacts),
-        mesh: () {
-          // Our own packet must never be processed again if it bounces back.
-          MeshReceiverService().markOwnPacket(packet.id);
-          return RelayService().broadcast(packet);
-        },
+        mesh: () => meshOffer(packet),
       );
       dispatched = attempts.any((a) => a.ok);
       debugPrint('[GUARDIAN_LOG] SOS $docId result: '

@@ -9,7 +9,7 @@ Flutter personal-safety app: detects possible emergencies (motion, voice keyword
 - **Offline speech**: on-device Whisper (`whisper_ggml_plus`, `assets/models/ggml-tiny.bin`) in `lib/services/local_whisper_service.dart`.
 - **Sound detection**: on-device YAMNet (`tflite_flutter`, `assets/models/yamnet.tflite`) in `lib/services/yamnet_service.dart`.
 - **Gemini analysis**: threat summary of transcript and sound label (`lib/services/ai_service.dart`).
-- **Mesh relay**: `nearby_connections` relay/receiver (`relay_service.dart`, `mesh_receiver_service.dart`), listener started from the background service.
+- **Mesh relay**: `nearby_connections` relay/receiver (`relay_service.dart`, `mesh_receiver_service.dart`). Nearby Connections needs an Activity, so it runs only in the UI isolate: **relay works while the app is open or alive in recents**. A voice or impact SOS raised in the background service is handed to the UI isolate (`relay_offer`); if the UI is not running the mesh channel reports "relay unavailable: app UI not running" and SMS / cloud carry on.
 - **Auth/storage**: Firebase Auth, Cloud Firestore (persistence enabled), Firebase Storage.
 - **Background service**: `flutter_background_service` keeps monitoring running.
 

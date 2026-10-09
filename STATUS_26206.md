@@ -16,6 +16,9 @@ Evidence available: `flutter test` (see the last run in the final report; unit t
 | SIMULATION (200 m, 10-degree bias) | SIMULATED | Learned offset and a mid-walk anchor each give a smaller error than neither on synthetic data. | Model check only, not a field measurement. |
 | Diagnostics screen | BUILDS, NEEDS DEVICE TEST | - | Service counters reach the UI as a snapshot every 2 s. |
 
+## Relay limit
+Nearby Connections needs an Activity, so all relay code (advertise, discover, beacons) runs only in the UI isolate: **relay works while the app is open or alive in recents**. SOS packets raised by the service isolate are handed over with `relay_offer`; with no UI the mesh channel fails with "relay unavailable: app UI not running". Diagnostics shows relay state "unavailable" with the reason when Nearby cannot start.
+
 ## Not done / known gaps
 - Release APK: see the final report for the result of `flutter build apk --release`.
 - `firestore.rules` is not tightened in the repo (it was removed from git tracking and remains the open demo rule on disk). A proposal is in `firestore.rules.proposed` (local only, not deployed).

@@ -23,7 +23,7 @@ import 'services/emergency_service.dart';
 import 'services/mesh_receiver_service.dart';
 import 'logic/anchor_beacon.dart';
 import 'services/pdr_services.dart';
-import 'services/relay_service.dart';
+import 'services/relay_bridge.dart';
 import 'services/sos_countdown_service.dart';
 import 'services/voice_service.dart';
 
@@ -74,6 +74,10 @@ Future<void> _startGuardian() async {
     // run PDR here too so an SOS from the button also has dead reckoning.
     DiagnosticsHub.listen();
     SosCountdownService.attachUi(navigatorKey);
+    // Nearby Connections needs the Activity, so the relay (offering SOS
+    // packets, discovering senders, sending anchor beacons) lives only here.
+    RelayBridge.attachUi();
+    await MeshReceiverService().startEmergencyListener();
     await VoiceService.startListening();
     await PdrService().start();
   } catch (e) {
@@ -212,10 +216,12 @@ void onStartService(ServiceInstance service) async {
     final b = parseBeacon(jsonEncode(event), DateTime.now().millisecondsSinceEpoch);
     if (b != null) PdrService().onAnchor(b, simulated: true);
   });
-  service.on('send_test_relay').listen((event) async {
-    final fix = PdrService().currentFix();
-    await RelayService().sendTestPacket(lat: fix?.lat ?? 0, lng: fix?.lng ?? 0);
+  service.on('anchor_beacon').listen((event) {
+    if (event == null) return;
+    final b = parseBeacon(jsonEncode(event), DateTime.now().millisecondsSinceEpoch);
+    if (b != null) PdrService().onAnchor(b);
   });
+  EmergencyService.meshOffer = RelayBridge.serviceOffer(service);
   service.on('stop_service').listen((event) => service.stopSelf());
 
   // B. Dead reckoning (keeps running while this service is alive).
@@ -227,13 +233,6 @@ void onStartService(ServiceInstance service) async {
     await VoiceService.startListening(background: true);
   } catch (e) {
     debugPrint('Service: audio monitor failed to start: $e');
-  }
-
-  // C. Listen for SOS packets from nearby phones.
-  try {
-    await MeshReceiverService().startEmergencyListener();
-  } catch (e) {
-    debugPrint('Service: mesh receiver failed to start: $e');
   }
 
   // Impact trigger: hard knock while rotating.

@@ -34,6 +34,7 @@ Nothing here has been measured on a phone yet. See "What is proven" at the end.
 - Diagnostics also has a switch per flag, a motion-context line, the last anchor (age, radius before and after) and a **Send test anchor (SIMULATED beacon)** button. Everything simulated is labelled SIMULATED.
 
 ## Limits
+- Relay and anchor beacons use Nearby Connections, which runs only in the UI isolate: **relay works while the app is open or alive in recents**. Beacons received there are passed to the PDR owner with the `anchor_beacon` event.
 - The heading offset assumes the phone orientation stays as it was when calibrated. The 40-degree gravity check only catches large changes; a slow change, or a phone moved in a way that keeps gravity the same (rotated about the vertical axis), is not detected.
 - Compass interference near metal, vehicles, power lines and electronics is only partly handled by the 25-65 microtesla gate; a disturbed field with a normal strength still gives a wrong heading.
 - Anchors need another Guardian phone with a good GPS fix to come close during an SOS, and the radio link between the phones to work. A far or old beacon is not exact: the 20 m minimum sigma is an assumption.

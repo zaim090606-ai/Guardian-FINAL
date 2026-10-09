@@ -61,6 +61,8 @@ class MeshReceiverService {
 
       if (!await RelayService.hasMeshPermissions()) {
         debugPrint('Mesh receiver: Bluetooth/Location permission missing.');
+        DiagnosticsHub.instance.relayUnavailableReason =
+            'Bluetooth / Nearby / Location permission missing';
         return;
       }
 
@@ -79,12 +81,19 @@ class MeshReceiverService {
         serviceId: RelayService.serviceId,
       );
       DiagnosticsHub.instance.discovering = _isDiscovering;
+      if (_isDiscovering) {
+        DiagnosticsHub.instance.relayUnavailableReason = null;
+      } else {
+        DiagnosticsHub.instance.relayUnavailableReason =
+            'discovery could not start';
+      }
       DiagnosticsHub.instance.relayEvent(_isDiscovering
           ? 'Discovering nearby SOS senders'
           : 'Discovery could not start');
       debugPrint('Mesh receiver discovering: $_isDiscovering');
     } catch (e) {
       _isDiscovering = false;
+      DiagnosticsHub.instance.relayUnavailableReason = 'Nearby error: $e';
       debugPrint('Mesh receiver failed to start: $e');
     }
   }
