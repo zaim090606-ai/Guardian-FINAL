@@ -238,8 +238,11 @@ class PdrService {
       p.longitude,
       p.accuracy,
       p.timestamp.millisecondsSinceEpoch,
-      speedMps: p.speed >= 0 ? p.speed : null,
+      speedMps: p.speed > 0 ? p.speed : null,
       courseDeg: p.heading >= 0 ? p.heading : null,
+      speedAccuracyMps: p.speedAccuracy > 0 ? p.speedAccuracy : null,
+      courseAccuracyDeg: p.headingAccuracy > 0 ? p.headingAccuracy : null,
+      mocked: p.isMocked,
     );
   }
 

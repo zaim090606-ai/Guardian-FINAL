@@ -176,12 +176,27 @@ class PdrEngine {
 
   static const double goodGpsAccuracyM = 15;
   static const double minLearnSpeedMps = 1.0;
+
+  /// Walking only: faster ground speed is a vehicle (or running), never used
+  /// for learning.
+  static const double maxLearnSpeedMps = 2.5;
+  static const double minCadenceHz = 0.8, maxCadenceHz = 2.5;
+  static const int minWindowSteps = 8;
   static const double minCourseBaselineM = 5;
   static const double strideWindowM = 20;
   static const double minStrideM = 0.45, maxStrideM = 1.0;
   static const double gravityChangeLimitDeg = 40;
+
+  /// Accepted windows needed before the offset / the stride count as learned.
   static const int minOffsetSamples = 3;
-  static const int minStrideSamples = 2;
+  static const int minStrideSamples = 3;
+
+  /// Largest GPS speed / course uncertainty that is still trusted.
+  static const double maxSpeedAccuracyMps = 1.0;
+  static const double maxCourseAccuracyDeg = 30;
+
+  /// A learning window older than this is dropped (it spans a GPS gap).
+  static const int maxWindowMs = 60000;
 
   /// ASSUMPTION: fastest plausible ground speed while in a vehicle whose
   /// direction we cannot know, and the cap on the radius that implies.
@@ -227,8 +242,16 @@ class PdrEngine {
   double? _courseRefLat, _courseRefLng;
   int _courseRefMs = 0;
   int _stepsSinceCourseRef = 0;
+  double _winSin = 0, _winCos = 0;
+  int _winN = 0;
+  bool _courseTainted = false;
   double? _strideRefLat, _strideRefLng;
+  int _strideRefMs = 0;
   int _stepsSinceStrideRef = 0;
+  bool _strideTainted = false;
+
+  /// Windows rejected by the learning gates (diagnostics).
+  int rejectedWindows = 0;
 
   PdrEngine({
     PdrConfig? config,
@@ -295,16 +318,22 @@ class PdrEngine {
 
   /// Feeds the microphone-derived context. While vehicle, steps are ignored
   /// and the uncertainty grows with time (we do not guess a direction).
-  void onContext(MotionContext c, int nowMs) {
+  void onContext(MotionContext requested, int nowMs) {
+    // With the flag off the context is unknown; switching it off mid-vehicle
+    // banks the growth so far instead of dropping it.
+    final c = config.microphoneContext ? requested : MotionContext.unknown;
     if (c == _context) return;
     final wasVehicle = _context == MotionContext.vehicle;
     if (wasVehicle) _vehicleBankedM = _vehicleGrowthM(nowMs);
-    if (c == MotionContext.vehicle) _vehicleSinceMs = nowMs;
+    if (c == MotionContext.vehicle) {
+      _vehicleSinceMs = nowMs;
+      _courseTainted = _strideTainted = true;
+    }
     _context = c;
   }
 
   double _vehicleGrowthM(int nowMs) {
-    final live = inVehicle
+    final live = _context == MotionContext.vehicle
         ? vehicleMaxSpeedMps * max(0, nowMs - _vehicleSinceMs) / 1000.0
         : 0.0;
     return min(vehicleMaxGrowthM, _vehicleBankedM + live);
@@ -330,8 +359,16 @@ class PdrEngine {
           ? driftCalibrated
           : driftUncalibrated);
 
+  /// [speedMps] / [courseDeg] are GPS ground speed and course when the
+  /// receiver reported them; [speedAccuracyMps] / [courseAccuracyDeg] their
+  /// uncertainty; [mocked] marks a fix from a mock-location provider (used for
+  /// positioning but never for learning).
   void onGpsFix(double lat, double lng, double accuracyM, int tMs,
-      {double? speedMps, double? courseDeg}) {
+      {double? speedMps,
+      double? courseDeg,
+      double? speedAccuracyMps,
+      double? courseAccuracyDeg,
+      bool mocked = false}) {
     if (accuracyM > maxUsableAccuracyM || (lat == 0 && lng == 0)) return;
     if (!_offsetValid) {
       // GPS is back: the old offset belonged to another phone orientation.
@@ -340,7 +377,8 @@ class PdrEngine {
       _offsetValid = true;
       _calGravity = _gravity;
     }
-    _learn(lat, lng, accuracyM, tMs, speedMps, courseDeg);
+    _learn(lat, lng, accuracyM, tMs, speedMps, courseDeg, speedAccuracyMps,
+        courseAccuracyDeg, mocked);
     _lat = lat;
     _lng = lng;
     _gpsLat = lat;
@@ -355,41 +393,88 @@ class PdrEngine {
     _anchorBeacon = null;
   }
 
+  void _resetCourseWindow(double lat, double lng, int tMs) {
+    _courseRefLat = lat;
+    _courseRefLng = lng;
+    _courseRefMs = tMs;
+    _stepsSinceCourseRef = 0;
+    _winSin = _winCos = 0;
+    _winN = 0;
+    _courseTainted = false;
+  }
+
+  void _resetStrideWindow(double lat, double lng, int tMs) {
+    _strideRefLat = lat;
+    _strideRefLng = lng;
+    _strideRefMs = tMs;
+    _stepsSinceStrideRef = 0;
+    _strideTainted = false;
+  }
+
+  void _dropWindows() {
+    _courseRefLat = _strideRefLat = null;
+  }
+
+  /// A GPS course is trusted only when it is in range, accurate enough, and
+  /// not Android's "no bearing" 0.0 (reported while barely moving).
+  static bool courseValid(double? course, double? speed, double? courseAcc) {
+    if (course == null || course < 0 || course >= 360) return false;
+    if (course == 0.0 && (speed == null || speed < 0.5)) return false;
+    if (courseAcc != null && courseAcc > maxCourseAccuracyDeg) return false;
+    return true;
+  }
+
   void _learn(double lat, double lng, double acc, int tMs, double? speed,
-      double? course) {
-    if (acc > goodGpsAccuracyM) {
-      _courseRefLat = _strideRefLat = null;
+      double? course, double? speedAcc, double? courseAcc, bool mocked) {
+    if (acc > goodGpsAccuracyM || mocked) {
+      _dropWindows();
       return;
     }
     // Windows must not span a GPS gap.
-    if (_courseRefLat != null && tMs - _courseRefMs > 30000) {
-      _courseRefLat = _strideRefLat = null;
+    if (_courseRefLat != null && tMs - _courseRefMs > maxWindowMs) {
+      _courseRefLat = null;
     }
-    if (_courseRefLat == null) {
-      _courseRefLat = lat;
-      _courseRefLng = lng;
-      _courseRefMs = tMs;
-      _stepsSinceCourseRef = 0;
-      _strideRefLat = lat;
-      _strideRefLng = lng;
-      _stepsSinceStrideRef = 0;
+    if (_strideRefLat != null && tMs - _strideRefMs > maxWindowMs) {
+      _strideRefLat = null;
+    }
+    final spd = (speed != null &&
+            speed > 0 &&
+            (speedAcc == null || speedAcc <= maxSpeedAccuracyMps))
+        ? speed
+        : null;
+    // Moving faster than a walk (or a vehicle is heard): nothing is learned
+    // and the windows start over.
+    if ((spd != null && spd > maxLearnSpeedMps) || inVehicle) {
+      _dropWindows();
+      _resetCourseWindow(lat, lng, tMs);
+      _resetStrideWindow(lat, lng, tMs);
       return;
     }
+    if (_courseRefLat == null) _resetCourseWindow(lat, lng, tMs);
+    if (_strideRefLat == null) _resetStrideWindow(lat, lng, tMs);
 
-    // Heading offset: GPS course vs compass, while walking.
+    // Heading offset: GPS course vs mean compass heading over a walking window.
     final disp = distanceM(_courseRefLat!, _courseRefLng!, lat, lng);
-    if (config.headingOffset && _heading != null && _stepsSinceCourseRef > 0) {
+    if (_stepsSinceCourseRef >= minWindowSteps && disp >= minCourseBaselineM) {
       final dt = (tMs - _courseRefMs) / 1000.0;
-      final v = speed ?? (dt > 0 ? disp / dt : 0);
-      if (v >= minLearnSpeedMps) {
-        double? c;
-        if (course != null && course >= 0 && course < 360) {
-          c = course;
-        } else if (disp >= minCourseBaselineM) {
-          c = bearingDeg(_courseRefLat!, _courseRefLng!, lat, lng);
+      final ok = _walkingWindowOk(disp, dt, _stepsSinceCourseRef,
+              minV: minLearnSpeedMps) &&
+          !_courseTainted;
+      double? meanHeading;
+      var spread = 0.0;
+      if (_winN > 0) {
+        meanHeading = atan2(_winSin, _winCos) * 180 / pi;
+        spread = sqrt(_winSin * _winSin + _winCos * _winCos) / _winN;
+      }
+      if (ok && config.headingOffset && meanHeading != null && spread >= 0.9) {
+        final bearing = bearingDeg(_courseRefLat!, _courseRefLng!, lat, lng);
+        double? c = bearing;
+        if (courseValid(course, spd, courseAcc)) {
+          // A reported course that disagrees with the displacement is noise.
+          c = angleDiff(course!, bearing).abs() <= 45 ? course : null;
         }
         if (c != null) {
-          final d = angleDiff(c, _heading!) * pi / 180;
+          final d = angleDiff(c, meanHeading) * pi / 180;
           const a = 0.25;
           if (_offsetSamples == 0) {
             _offSin = sin(d);
@@ -400,28 +485,52 @@ class PdrEngine {
           }
           _offsetSamples++;
           _calGravity = _gravity;
+        } else {
+          rejectedWindows++;
         }
+      } else if (config.headingOffset) {
+        rejectedWindows++;
       }
-    }
-    if (disp >= minCourseBaselineM) {
-      _courseRefLat = lat;
-      _courseRefLng = lng;
-      _courseRefMs = tMs;
-      _stepsSinceCourseRef = 0;
+      _resetCourseWindow(lat, lng, tMs);
+    } else if (_stepsSinceCourseRef >= minWindowSteps && disp < minCourseBaselineM) {
+      // Steps without displacement (fidgeting): start over.
+      _resetCourseWindow(lat, lng, tMs);
     }
 
     // Stride: GPS distance / steps over windows of at least 20 m.
     final sd = distanceM(_strideRefLat!, _strideRefLng!, lat, lng);
     if (sd >= strideWindowM) {
-      if (config.strideLearning && _stepsSinceStrideRef > 0) {
-        final sample = sd / _stepsSinceStrideRef;
-        _stride = (_stride * 0.6 + sample * 0.4).clamp(minStrideM, maxStrideM);
-        _strideSamples++;
+      if (config.strideLearning) {
+        final dt = (tMs - _strideRefMs) / 1000.0;
+        final steps = _stepsSinceStrideRef;
+        final implied = steps > 0 ? sd / steps : 0.0;
+        if (!_strideTainted &&
+            steps >= minWindowSteps &&
+            _walkingWindowOk(sd, dt, steps, minV: 0.5) &&
+            implied >= minStrideM &&
+            implied <= maxStrideM) {
+          _stride = (_stride * 0.6 + implied * 0.4).clamp(minStrideM, maxStrideM);
+          _strideSamples++;
+        } else {
+          rejectedWindows++;
+        }
       }
-      _strideRefLat = lat;
-      _strideRefLng = lng;
-      _stepsSinceStrideRef = 0;
+      _resetStrideWindow(lat, lng, tMs);
     }
+  }
+
+  /// Speed, cadence and stride of a window all look like a person walking.
+  bool _walkingWindowOk(double distM, double dtS, int steps, {required double minV}) {
+    if (dtS <= 0 || steps <= 0) return false;
+    final v = distM / dtS;
+    final cadence = steps / dtS;
+    final stride = distM / steps;
+    return v >= minV &&
+        v <= maxLearnSpeedMps &&
+        cadence >= minCadenceHz &&
+        cadence <= maxCadenceHz &&
+        stride >= minStrideM &&
+        stride <= maxStrideM;
   }
 
   void onHeading(double degrees) => _heading = degrees;
@@ -472,6 +581,9 @@ class PdrEngine {
       _extraUncertaintyM += 0.5 * stride;
       return;
     }
+    _winSin += sin(raw * pi / 180);
+    _winCos += cos(raw * pi / 180);
+    _winN++;
     if (headingOffsetInvalidated) _extraUncertaintyM += 0.5 * stride;
     final heading = raw + (headingOffsetDeg ?? 0);
     final h = heading * pi / 180;
