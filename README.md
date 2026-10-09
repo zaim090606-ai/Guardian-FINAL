@@ -13,7 +13,7 @@ Flutter personal-safety app: detects possible emergencies (motion, voice keyword
 - **Auth/storage**: Firebase Auth, Cloud Firestore (persistence enabled), Firebase Storage.
 - **Background service**: `flutter_background_service` keeps monitoring running.
 
-Status of each service is in [AUDIT_26206.md](AUDIT_26206.md). Wiring is checked statically; not all paths have been tested on a device.
+The SOS sends SMS and the cloud write at the same time; personal alert data is stored in a private subdocument (see `firestore.rules.proposed`, not deployed). Status of each service is in [AUDIT_26206.md](AUDIT_26206.md). Wiring is checked statically; not all paths have been tested on a device.
 
 ## Project layout
 ```

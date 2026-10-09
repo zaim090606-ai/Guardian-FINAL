@@ -31,7 +31,7 @@ Open **Diagnostics** from the monitor icon at the top right of the home screen. 
 
 ## Two phones (A offline, B online)
 
-Both phones need the app installed, permissions granted, and Bluetooth, Wi-Fi and Location switched on (see "Airplane mode and relay tests" below). Keep them within a few metres. Make sure the foreground notification "Guardian Safety Active" is showing on both.
+Both phones need the app installed, permissions granted, and Bluetooth, Wi-Fi and Location switched on (see "Airplane mode and relay tests" below). Keep them within a few metres. Relay works while the app is open or alive in recents: keep the app open (or in recents) on both phones. Make sure the foreground notification "Guardian Safety Active" is showing on both.
 
 | # | Step | Expected result | Pass/Fail |
 |---|------|-----------------|-----------|
@@ -41,7 +41,7 @@ Both phones need the app installed, permissions granted, and Bluetooth, Wi-Fi an
 | 18 | Phone B: watch Diagnostics for up to 60 s. | Peers found 1 or more, Received 1, Uploaded 1. A notification "Emergency signal received" appears. | [ ] Pass [ ] Fail |
 | 19 | Firebase console, collection `emergency_logs`. | A document with id `test-...`, `relayedByMesh: true`, `simulated: true`, `status: test` exists. | [ ] Pass [ ] Fail |
 | 20 | Phone A: press the real SOS button while still offline. | A's attempt log shows firestore FAILED, sms (OK or FAILED), relay OK. B's Received counter increases and a document with A's alert id appears in Firestore with `relayedByMesh: true`. | [ ] Pass [ ] Fail |
-| 21 | Open the same alert id on the tracking page `https://fir-b10e4.web.app/alert/<id>` | Page shows the location; ESTIMATED is flagged if the source was estimated. | [ ] Pass [ ] Fail |
+| 21 | Open the same alert id on the tracking page `https://guardian-b7926.web.app/alert/<id>` | Page shows the location; ESTIMATED is flagged if the source was estimated. | [ ] Pass [ ] Fail |
 | 22 | Repeat step 17 a second time with the same phones. | B counts a new packet (new id). Sending the same id again would show as `duplicate` in the event list and is not uploaded twice. | [ ] Pass [ ] Fail |
 | 23 | Phone B: turn off internet, repeat step 17 from A, then turn B's internet back on. | B Queued 1, "waiting" 1; within about 60 s of connectivity returning Uploaded rises and the document appears. | [ ] Pass [ ] Fail |
 

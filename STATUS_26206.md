@@ -24,3 +24,9 @@ Nearby Connections needs an Activity, so all relay code (advertise, discover, be
 - `firestore.rules` is not tightened in the repo (it was removed from git tracking and remains the open demo rule on disk). A proposal is in `firestore.rules.proposed` (local only, not deployed).
 - Hardcoded fallback contact number was removed from `EmergencyService`; with no saved contact the SMS channel reports an error instead of texting a stranger.
 - Key rotation: the old Gemini key is still in `origin/main` history and must be rotated.
+
+## Changes after REVIEW_26206.md (all UNIT-TESTED on logic only; none run on a phone)
+- SOS dispatch: the SMS and the cloud write start together; the alert id and tracking link are made locally; contacts and location come from local storage first; Firebase is touched only inside the cloud channel. A persisted active-SOS guard stops a second trigger from sending again; `cancel_sos` stops tracking and relay in both isolates.
+- PDR: one owner (the service isolate). Learning only from clean walking windows. Flags persisted; GPS-loss simulation resets to OFF on restart.
+- Relay/anchors: beacon only after a valid packet, helper-supplied age, deduped, sigma sqrt(acc^2+25^2), 150 m jump check, 20 s connection hold, rate limits (3 packets/min per endpoint, 30 new ids/min), full queue rejects newcomers, packets older than 2 h rejected.
+- Firestore: personal fields (phone, transcript, audio link/analysis, AI summary) go to `emergency_logs/{id}/private/details`; `firestore.rules.proposed` is rewritten but has NOT been run in the emulator and is NOT deployed. If a relayer uploads an alert before the origin phone, the origin cannot update it.
