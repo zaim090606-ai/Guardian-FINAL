@@ -232,11 +232,33 @@ void main() {
       expect(e.onAnchor(b, now + 1), isNull);
       expect(e.onAnchor(b, now + 2), isNull);
       expect(e.currentFix(now)!.uncertaintyM, closeTo(r1, 1e-9));
-      // a new measurement (new timestamp) is accepted
+      // a fresh timestamp from the same spot is the same GPS error again
       expect(
           e.onAnchor(
               beacon(lat: 28.0 + northM(310), acc: 5, ts: now - 1000), now + 3),
+          isNull);
+      expect(e.currentFix(now)!.uncertaintyM, closeTo(r1, 1e-9));
+      // a measurement from a different place is accepted
+      expect(
+          e.onAnchor(
+              beacon(lat: 28.0 + northM(360), acc: 5, ts: now - 900), now + 4),
           isNotNull);
+    });
+
+    test('a helper standing still cannot shrink the radius with new timestamps',
+        () {
+      final e = staleEngine(steps: 400);
+      expect(e.onAnchor(beacon(lat: 28.0 + northM(310), ts: now - 3000), now),
+          isNotNull);
+      final r1 = e.currentFix(now)!.uncertaintyM;
+      for (var i = 1; i <= 5; i++) {
+        expect(
+            e.onAnchor(
+                beacon(lat: 28.0 + northM(310), ts: now - 3000 + i * 30000),
+                now + i * 30000),
+            isNull);
+      }
+      expect(e.currentFix(now)!.uncertaintyM, closeTo(r1, 1e-9));
     });
 
     test('an anchor 150 m+ from a confident estimate is rejected', () {

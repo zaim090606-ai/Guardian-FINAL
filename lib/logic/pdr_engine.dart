@@ -231,6 +231,13 @@ class PdrEngine {
   AnchorBeacon? _anchorBeacon;
   final LinkedHashSet<String> _usedBeacons = LinkedHashSet<String>();
 
+  /// Where and when beacons were applied. A helper standing still sends fresh
+  /// beacons with new timestamps; they repeat the same GPS error, so they must
+  /// not shrink the radius again.
+  final List<({double lat, double lng, int ms})> _usedSpots = [];
+  static const double anchorSameSpotM = 30;
+  static const int anchorSameSpotWindowMs = 5 * 60 * 1000;
+
   /// Beacons refused because they were too far from a confident estimate.
   int rejectedAnchors = 0;
 
@@ -294,12 +301,20 @@ class PdrEngine {
     if (nowMs - _lastGpsMs! <= staleAfterMs) return null;
     // One measurement is applied once: repeating it must not shrink the radius.
     if (_usedBeacons.contains(b.dedupeKey)) return null;
+    for (final u in _usedSpots) {
+      if (nowMs - u.ms < anchorSameSpotWindowMs &&
+          distanceM(u.lat, u.lng, b.lat, b.lng) < anchorSameSpotM) {
+        return null;
+      }
+    }
     final before = uncertaintyAt(nowMs);
     if (before < anchorConfidentSigmaM &&
         distanceM(_lat!, _lng!, b.lat, b.lng) > anchorMaxJumpM) {
       rejectedAnchors++;
       return null;
     }
+    _usedSpots.add((lat: b.lat, lng: b.lng, ms: nowMs));
+    if (_usedSpots.length > 10) _usedSpots.removeAt(0);
     _usedBeacons.add(b.dedupeKey);
     if (_usedBeacons.length > 20) _usedBeacons.remove(_usedBeacons.first);
     final r = fuseAnchor(
