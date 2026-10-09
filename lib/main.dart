@@ -270,9 +270,14 @@ void onStartService(ServiceInstance service) async {
     gyroscopeEventStream().listen((GyroscopeEvent e) {
       rotation = sqrt(e.x * e.x + e.y * e.y + e.z * e.z);
     });
+    var lastImpactMs = 0;
     accelerometerEventStream().listen((AccelerometerEvent e) {
       final force = sqrt(e.x * e.x + e.y * e.y + e.z * e.z);
-      if (force > 25.0 && rotation > 5.0) {
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      // One trigger per minute: a shaken phone (or a user who just cancelled)
+      // must not start a new dispatch on every sample.
+      if (force > 25.0 && rotation > 5.0 && nowMs - lastImpactMs > 60000) {
+        lastImpactMs = nowMs;
         EmergencyService.triggerEmergencyDispatch(
           force: force,
           level: 'Severe Rotational Impact',
