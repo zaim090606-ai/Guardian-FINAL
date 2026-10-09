@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:nearby_connections/nearby_connections.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../logic/advertising_controller.dart';
 import '../logic/anchor_beacon.dart';
 import '../logic/sos_packet.dart';
 import 'diagnostics_hub.dart';
@@ -26,9 +27,16 @@ class RelayService {
 
   final Map<String, SosPacket> _active = {};
   final Map<String, Timer> _expiry = {};
-  bool _advertising = false;
 
-  bool get isAdvertising => _advertising;
+  late final AdvertisingController _adv = AdvertisingController(
+    start: _startAdvertising,
+    stopAll: () async {
+      await Nearby().stopAdvertising();
+      await Nearby().stopAllEndpoints();
+    },
+  );
+
+  bool get isAdvertising => _adv.advertising;
 
   /// True when the runtime permissions Nearby Connections needs are granted.
   /// Does not prompt: the foreground-service isolate has no UI to show dialogs.
@@ -61,40 +69,7 @@ class RelayService {
       _expiry[packet.id]?.cancel();
       _expiry[packet.id] = Timer(offerWindow, () => _expire(packet.id));
 
-      if (_advertising) return true;
-
-      final started = await Nearby().startAdvertising(
-        'GUARDIAN_SOS',
-        strategy,
-        onConnectionInitiated: (String id, ConnectionInfo info) async {
-          try {
-            await Nearby().acceptConnection(
-              id,
-              onPayLoadRecieved: (String endpointId, Payload payload) =>
-                  _onPayload(payload),
-              onPayloadTransferUpdate:
-                  (String endpointId, PayloadTransferUpdate update) {},
-            );
-          } catch (e) {
-            debugPrint('Mesh relay accept failed: $e');
-          }
-        },
-        onConnectionResult: (String id, Status status) {
-          if (status == Status.CONNECTED) {
-            DiagnosticsHub.instance.connectedPeers++;
-            DiagnosticsHub.instance.relayEvent('Peer connected (sender side)');
-            _sendAll(id);
-          }
-        },
-        onDisconnected: (String id) {
-          final h = DiagnosticsHub.instance;
-          if (h.connectedPeers > 0) h.connectedPeers--;
-          debugPrint('Mesh relay peer disconnected: $id');
-        },
-        serviceId: serviceId,
-      );
-
-      _advertising = started;
+      final started = await _adv.ensureStarted();
       DiagnosticsHub.instance.advertising = started;
       DiagnosticsHub.instance.relayUnavailableReason =
           started ? null : 'advertising could not start';
@@ -104,10 +79,42 @@ class RelayService {
       return started;
     } catch (e) {
       debugPrint('Mesh relay error: $e');
-      _advertising = false;
       DiagnosticsHub.instance.relayUnavailableReason = 'Nearby error: $e';
       return false;
     }
+  }
+
+  Future<bool> _startAdvertising() {
+    return Nearby().startAdvertising(
+      'GUARDIAN_SOS',
+      strategy,
+      onConnectionInitiated: (String id, ConnectionInfo info) async {
+        try {
+          await Nearby().acceptConnection(
+            id,
+            onPayLoadRecieved: (String endpointId, Payload payload) =>
+                _onPayload(payload),
+            onPayloadTransferUpdate:
+                (String endpointId, PayloadTransferUpdate update) {},
+          );
+        } catch (e) {
+          debugPrint('Mesh relay accept failed: $e');
+        }
+      },
+      onConnectionResult: (String id, Status status) {
+        if (status == Status.CONNECTED) {
+          DiagnosticsHub.instance.connectedPeers++;
+          DiagnosticsHub.instance.relayEvent('Peer connected (sender side)');
+          _sendAll(id);
+        }
+      },
+      onDisconnected: (String id) {
+        final h = DiagnosticsHub.instance;
+        if (h.connectedPeers > 0) h.connectedPeers--;
+        debugPrint('Mesh relay peer disconnected: $id');
+      },
+      serviceId: serviceId,
+    );
   }
 
   /// Beacons from helper phones are accepted only while an SOS of ours is
@@ -171,21 +178,19 @@ class RelayService {
     ));
   }
 
-  /// Stops advertising, e.g. when the SOS is cancelled.
+  /// Stops advertising, e.g. when the SOS is cancelled. Also tries when the
+  /// advertising state is uncertain (a start failed or is still running).
   Future<void> stopRelay() async {
     for (final t in _expiry.values) {
       t.cancel();
     }
     _expiry.clear();
     _active.clear();
-    if (!_advertising) return;
-    _advertising = false;
-    DiagnosticsHub.instance.advertising = false;
     try {
-      await Nearby().stopAdvertising();
-      await Nearby().stopAllEndpoints();
+      await _adv.stop();
     } catch (e) {
       debugPrint('Mesh relay stop failed: $e');
     }
+    DiagnosticsHub.instance.advertising = _adv.advertising;
   }
 }

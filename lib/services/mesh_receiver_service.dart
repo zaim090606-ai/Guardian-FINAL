@@ -46,7 +46,34 @@ class MeshReceiverService {
 
   bool get isDiscovering => _isDiscovering;
   /// Marks a packet this device created as seen so it is never re-handled.
-  void markOwnPacket(String id) => _handler.seen.markIfNew(id);
+  void markOwnPacket(String id) {
+    _handler.seen.markIfNew(id);
+    _ownIds.add(id);
+    unawaited(_persistOwnIds());
+  }
+
+  static const String _ownIdsKey = 'own_packet_ids';
+  OwnPacketIds _ownIds = OwnPacketIds();
+
+  Future<void> _restoreOwnIds() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      _ownIds = OwnPacketIds.decode(prefs.getString(_ownIdsKey));
+      for (final id in _ownIds.ids) {
+        _handler.seen.markIfNew(id);
+      }
+    } catch (e) {
+      debugPrint('Own packet ids unreadable: $e');
+    }
+  }
+
+  Future<void> _persistOwnIds() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_ownIdsKey, _ownIds.encode());
+    } catch (_) {}
+  }
 
   int get pendingCount => _handler.queue.length;
 
@@ -57,6 +84,7 @@ class MeshReceiverService {
     try {
       await _initNotifications();
       await _restoreQueue();
+      await _restoreOwnIds();
       _startRetryLoop();
 
       if (!await RelayService.hasMeshPermissions()) {

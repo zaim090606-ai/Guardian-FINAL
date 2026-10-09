@@ -21,6 +21,36 @@ class SeenCache {
   bool contains(String id) => _ids.contains(id);
 }
 
+/// Ids of SOS packets this phone created, kept across restarts so a packet
+/// that comes back through a relayer is never processed as someone else's.
+class OwnPacketIds {
+  final int capacity;
+  final List<String> ids = [];
+  OwnPacketIds({this.capacity = 100});
+
+  void add(String id) {
+    if (ids.contains(id)) return;
+    ids.add(id);
+    if (ids.length > capacity) ids.removeAt(0);
+  }
+
+  String encode() => jsonEncode(ids);
+
+  static OwnPacketIds decode(String? raw, {int capacity = 100}) {
+    final r = OwnPacketIds(capacity: capacity);
+    if (raw == null || raw.isEmpty) return r;
+    try {
+      final list = jsonDecode(raw);
+      if (list is List) {
+        for (final e in list) {
+          if (e is String) r.add(e);
+        }
+      }
+    } catch (_) {}
+    return r;
+  }
+}
+
 /// Packets waiting for an internet connection. Deduplicated by id and bounded.
 class PacketQueue {
   final int capacity;
