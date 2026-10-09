@@ -53,4 +53,17 @@ void main() {
     expect(r.private.keys.toSet(), {'userId', 'userPhone', 'transcript', 'audioUrl'});
     expect(r.private['userId'], 'uid1');
   });
+
+  test('split drops null values so the rules (absent-or-typed) accept the write', () {
+    final r = AlertSchema.split({
+      'latitude': 1.0,
+      'anchorAgeS': null,
+      'anchorRadiusM': null,
+      'locationFixTimeMs': null,
+      'audioUrl': null,
+      'audioAnalysis': '',
+    }, 'uid1');
+    expect(r.public.keys.toSet(), {'userId', 'latitude'});
+    expect(r.private.keys.toSet(), {'userId', 'audioAnalysis'});
+  });
 }

@@ -56,13 +56,15 @@ class AlertSchema {
   };
 
   /// Splits [data] into the public document and the private one, adding
-  /// [uid] as the owner of both. Unknown keys are dropped.
+  /// [uid] as the owner of both. Unknown keys and null values are dropped: the
+  /// rules accept an absent optional field but reject one that is present
+  /// and null.
   static ({Map<String, dynamic> public, Map<String, dynamic> private}) split(
       Map<String, dynamic> data, String uid) {
     final pub = <String, dynamic>{'userId': uid};
     final priv = <String, dynamic>{'userId': uid};
     data.forEach((k, v) {
-      if (k == 'userId') return;
+      if (k == 'userId' || v == null) return;
       if (privateKeys.contains(k)) {
         priv[k] = v;
       } else if (publicKeys.contains(k)) {
