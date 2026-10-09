@@ -61,7 +61,12 @@ class MeshReceiverService {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.reload();
-      _ownIds = OwnPacketIds.decode(prefs.getString(_ownIdsKey));
+      // Keep ids added before the restore finished.
+      final restored = OwnPacketIds.decode(prefs.getString(_ownIdsKey));
+      for (final id in _ownIds.ids) {
+        restored.add(id);
+      }
+      _ownIds = restored;
       for (final id in _ownIds.ids) {
         _handler.seen.markIfNew(id);
       }
