@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -24,6 +25,8 @@ class RelayBridge {
   /// UI isolate: answers relay offers from the service isolate.
   static void attachUi() {
     final bg = FlutterBackgroundService();
+    // The service cancelled (or finished cancelling) an SOS it had offered.
+    bg.on('relay_stop').listen((_) => unawaited(RelayService().stopRelay()));
     bg.on('relay_offer').listen((event) async {
       if (event == null) return;
       var ok = false;

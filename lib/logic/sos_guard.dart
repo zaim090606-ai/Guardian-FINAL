@@ -82,7 +82,8 @@ class SosGuard {
 
 /// What to stop when the user cancels an SOS: live tracking timers, Firestore
 /// location writes and relay advertising register themselves here. Each
-/// isolate has its own session; a `cancel_sos` event reaches both.
+/// isolate has its own session; the UI also sends `cancel_sos` to the service,
+/// and the service answers with `relay_stop` for a relay the UI advertises.
 class SosSession {
   final SosGuard guard;
   final List<void Function()> _onCancel = [];

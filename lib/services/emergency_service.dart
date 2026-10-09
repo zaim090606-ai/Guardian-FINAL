@@ -49,6 +49,11 @@ class EmergencyService {
     return RelayService().broadcast(packet);
   };
 
+  /// Withdraws the offered packet. In the UI isolate this stops advertising
+  /// directly; the service isolate replaces it with a `relay_stop` message,
+  /// because the relay only runs in the UI isolate.
+  static void Function() meshStop = () => unawaited(RelayService().stopRelay());
+
   /// Best location available right now, without waiting for a new GPS read.
   static Future<LocationFix?> Function() locationNow = _defaultLocationNow;
 
@@ -87,7 +92,7 @@ class EmergencyService {
       _activeId = docId;
       _session = SosSession(guard);
       _session.onCancel(_stopTimers);
-      _session.onCancel(() => unawaited(RelayService().stopRelay()));
+      _session.onCancel(() => meshStop());
       debugPrint('[GUARDIAN_LOG] SOS $docId triggered: $level (force $force)');
 
       // Nothing below this line waits for the network before the SMS starts.
@@ -165,6 +170,14 @@ class EmergencyService {
       debugPrint('[GUARDIAN_LOG] SOS $docId result: '
           '${attempts.map((a) => "${a.channel}=${a.ok ? "ok" : "fail"}").join(", ")}');
 
+      // The user may have cancelled while the channels were running: do not
+      // start tracking or recording, and withdraw a relay that started late.
+      if (_activeId != docId) {
+        meshStop();
+        debugPrint('[GUARDIAN_LOG] SOS $docId cancelled during dispatch.');
+        return;
+      }
+
       // Everything below is best effort and never delays the alert itself.
       _startLiveTracking(docId);
       unawaited(_refineLocation(docId, fix));
@@ -190,8 +203,11 @@ class EmergencyService {
   // ------------------------------------------------------------------ cancel
 
   /// UI isolate: cancels the SOS here and tells the service isolate to do the
-  /// same (`cancel_sos` reaches both isolates).
+  /// same; the service answers with `relay_stop` for its own offer.
   static Future<void> cancelSos() async {
+    // An SOS sent by the service isolate is advertised from this isolate, so
+    // withdraw it here whichever isolate dispatched it.
+    meshStop();
     await stopLocal();
     try {
       FlutterBackgroundService().invoke('cancel_sos');

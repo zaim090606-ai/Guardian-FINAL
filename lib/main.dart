@@ -228,6 +228,7 @@ void onStartService(ServiceInstance service) async {
   });
   EmergencyService.isServiceIsolate = true;
   EmergencyService.meshOffer = RelayBridge.serviceOffer(service);
+  EmergencyService.meshStop = () => service.invoke('relay_stop');
   // The user cancelled: stop this isolate's tracking timers, Firestore
   // location writes and clear the active-SOS guard (also cancels a countdown).
   service.on(SosCountdownService.cancelAction).listen((_) {
