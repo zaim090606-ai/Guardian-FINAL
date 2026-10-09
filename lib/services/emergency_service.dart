@@ -404,7 +404,8 @@ class EmergencyService {
         'locationSource': 'gps',
         'locationUncertaintyM': p.accuracy,
         'isDeadReckoning': false,
-        'locationFixTimeMs': p.timestamp.millisecondsSinceEpoch,
+        'locationFixTimeMs': clampFixTime(
+            p.timestamp.millisecondsSinceEpoch, DateTime.now().millisecondsSinceEpoch),
         'locationAgeS': 0,
       });
     } catch (e) {
