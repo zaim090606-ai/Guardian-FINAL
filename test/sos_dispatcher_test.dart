@@ -100,21 +100,47 @@ void main() {
     expect(r[2].ok, isTrue);
   });
 
-  test('cloud copy is created before the SMS with the link is sent', () async {
+  test('SMS starts before a slow cloud channel finishes', () async {
     final order = <String>[];
-    await make().dispatch(
+    await make(cloud: const Duration(seconds: 2), sms: const Duration(seconds: 2))
+        .dispatch(
+            sosId: 'x',
+            cloud: () async {
+              order.add('cloud-start');
+              await Future<void>.delayed(const Duration(milliseconds: 80));
+              order.add('cloud-done');
+              return true;
+            },
+            sms: () async {
+              order.add('sms-start');
+              return true;
+            },
+            mesh: () => ok('mesh'));
+    expect(order.indexOf('sms-start'), lessThan(order.indexOf('cloud-done')));
+  });
+
+  test('SMS goes out while the cloud channel hangs, and when it throws',
+      () async {
+    final never = Completer<bool>();
+    var smsAt = -1;
+    final sw = Stopwatch()..start();
+    final r = await make(cloud: const Duration(milliseconds: 300)).dispatch(
         sosId: 'x',
-        cloud: () async {
-          await Future<void>.delayed(const Duration(milliseconds: 50));
-          order.add('cloud-done');
-          return true;
-        },
+        cloud: () => never.future,
         sms: () async {
-          order.add('sms-start');
+          smsAt = sw.elapsedMilliseconds;
           return true;
         },
         mesh: () => ok('mesh'));
-    expect(order, ['cloud-done', 'sms-start']);
+    expect(smsAt, lessThan(100));
+    expect(r[1].ok, isTrue);
+    final r2 = await make().dispatch(
+        sosId: 'x',
+        cloud: () async => throw StateError('Firebase not initialised'),
+        sms: () => ok('sms'),
+        mesh: () => ok('mesh'));
+    expect(r2[1].ok, isTrue);
+    expect(r2[2].channel, 'mesh');
   });
 
   test('offline cloud failure does not delay the SMS', () async {

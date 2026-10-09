@@ -78,6 +78,7 @@ Future<void> _startGuardian() async {
     // packets, discovering senders, sending anchor beacons) lives only here.
     RelayBridge.attachUi();
     await MeshReceiverService().startEmergencyListener();
+    unawaited(EmergencyService.refreshCloudContacts());
     await VoiceService.startListening();
     await PdrService().start();
   } catch (e) {
@@ -93,7 +94,7 @@ Future<void> _initNotifications() async {
     ),
     onDidReceiveNotificationResponse: (NotificationResponse r) {
       if (r.actionId == SosCountdownService.cancelAction) {
-        FlutterBackgroundService().invoke(SosCountdownService.cancelAction);
+        unawaited(EmergencyService.cancelSos());
       }
     },
   );
@@ -222,6 +223,12 @@ void onStartService(ServiceInstance service) async {
     if (b != null) PdrService().onAnchor(b);
   });
   EmergencyService.meshOffer = RelayBridge.serviceOffer(service);
+  // The user cancelled: stop this isolate's tracking timers, Firestore
+  // location writes and clear the active-SOS guard (also cancels a countdown).
+  service.on(SosCountdownService.cancelAction).listen((_) {
+    SosCountdownService.cancel();
+    unawaited(EmergencyService.stopLocal());
+  });
   service.on('stop_service').listen((event) => service.stopSelf());
 
   // B. Dead reckoning (keeps running while this service is alive).

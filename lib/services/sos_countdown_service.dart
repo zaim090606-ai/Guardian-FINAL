@@ -6,6 +6,7 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../logic/countdown.dart';
+import 'emergency_service.dart';
 
 /// False-alarm protection for automatically detected SOS events (voice,
 /// scream, siren). The service isolate shows a "sending in N seconds" alert
@@ -26,7 +27,6 @@ class SosCountdownService {
 
   static void attachService(ServiceInstance service) {
     _service = service;
-    service.on(cancelAction).listen((_) => cancel());
   }
 
   /// Returns true when the SOS should be sent (nobody cancelled in time).
@@ -109,7 +109,7 @@ class SosCountdownService {
         builder: (_) => _CountdownDialog(
           reason: reason,
           seconds: (event?['seconds'] as num?)?.toInt() ?? seconds,
-          onCancel: () => bg.invoke(cancelAction),
+          onCancel: () => unawaited(EmergencyService.cancelSos()),
         ),
       ).whenComplete(() => _dialogOpen = false);
     });

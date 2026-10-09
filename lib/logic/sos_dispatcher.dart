@@ -78,7 +78,7 @@ class AttemptLog {
 typedef SosChannel = Future<bool> Function();
 
 /// Runs the SOS channels so that no single path is a point of failure:
-///  * cloud (Firestore) goes first, then SMS and the mesh fallback;
+///  * cloud (Firestore) and SMS start together;
 ///  * every channel has its own timeout and exceptions are contained;
 ///  * the mesh relay is tried when the cloud upload did not succeed;
 ///  * every attempt is reported to [onAttempt].
@@ -97,29 +97,25 @@ class SosDispatcher {
     this.meshTimeout = const Duration(seconds: 10),
   }) : nowMs = nowMs ?? (() => DateTime.now().millisecondsSinceEpoch);
 
-  /// Order: the cloud copy of the alert is created first, so that the tracking
-  /// link in the SMS already points at an existing document whenever there is
-  /// any internet. Offline, that attempt fails at once (the write stays queued
-  /// locally) and nothing is delayed. SMS and the mesh fallback then run
-  /// together.
+  /// SMS and the cloud write start together, so the SMS never waits for the
+  /// cloud. The mesh fallback starts as soon as the cloud channel has failed
+  /// or timed out (cloudTimeout, 6 s). Offline, the cloud channel fails at once.
+  /// The tracking link in the SMS is built from the locally generated id, so it
+  /// does not depend on the document existing yet.
   Future<List<SosAttempt>> dispatch({
     required String sosId,
     required SosChannel cloud,
     required SosChannel sms,
     required SosChannel mesh,
   }) async {
-    final cloudResult = await _run(sosId, 'cloud', cloud, cloudTimeout);
+    final cloudFuture = _run(sosId, 'cloud', cloud, cloudTimeout);
     final smsFuture = _run(sosId, 'sms', sms, smsTimeout);
-    Future<SosAttempt>? meshFuture;
-    if (!cloudResult.ok) {
-      meshFuture = _run(sosId, 'mesh', mesh, meshTimeout);
-    }
+    final Future<SosAttempt?> meshFuture = cloudFuture.then<SosAttempt?>(
+        (c) => c.ok ? null : _run(sosId, 'mesh', mesh, meshTimeout));
+    final cloudResult = await cloudFuture;
     final smsResult = await smsFuture;
-    return [
-      cloudResult,
-      smsResult,
-      if (meshFuture != null) await meshFuture,
-    ];
+    final meshResult = await meshFuture;
+    return [cloudResult, smsResult, if (meshResult != null) meshResult];
   }
 
   Future<SosAttempt> _run(

@@ -250,7 +250,7 @@ class _SensorScreenState extends State<SensorScreen>
               Navigator.pop(dialogContext);
 
               // Stop live GPS stream if user cancels
-              await EmergencyService.stopLiveTracking();
+              await EmergencyService.cancelSos();
 
               if (mounted) {
                 setState(() {

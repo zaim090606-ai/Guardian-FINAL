@@ -1,0 +1,107 @@
+import 'dart:convert';
+import 'dart:math';
+
+/// Minimal async key/value storage (SharedPreferences in the app, a map in
+/// tests). Implementations must read fresh values (reload) so two isolates see
+/// each other's writes.
+abstract class KeyValueStore {
+  Future<String?> read(String key);
+  Future<void> write(String key, String value);
+  Future<void> remove(String key);
+}
+
+class MemoryKeyValueStore implements KeyValueStore {
+  final Map<String, String> data = {};
+  @override
+  Future<String?> read(String key) async => data[key];
+  @override
+  Future<void> write(String key, String value) async => data[key] = value;
+  @override
+  Future<void> remove(String key) async => data.remove(key);
+}
+
+/// Random 20-character id from Firestore's auto-id alphabet. Needs no network,
+/// so the tracking link can be built before any I/O.
+String generateAlertId([Random? rng]) {
+  const chars =
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  final r = rng ?? Random.secure();
+  return String.fromCharCodes(
+      List.generate(20, (_) => chars.codeUnitAt(r.nextInt(chars.length))));
+}
+
+class GuardResult {
+  /// The SOS id to use: a fresh one, or the one already active.
+  final String id;
+
+  /// True when this call started a new SOS; false when it reused an active one.
+  final bool isNew;
+  const GuardResult(this.id, this.isNew);
+}
+
+/// Persisted "an SOS is active" record shared by the UI and service isolates,
+/// so a voice trigger and a button press cannot send two SOS.
+class SosGuard {
+  static const String key = 'active_sos';
+
+  /// A record older than this is treated as stale (crash, missed cancel).
+  static const Duration maxActive = Duration(hours: 1);
+
+  final KeyValueStore store;
+  SosGuard(this.store);
+
+  /// Starts [newId] unless an SOS is already active, in which case that one is
+  /// returned and nothing should be sent again.
+  Future<GuardResult> begin(String newId, int nowMs) async {
+    final existing = await active(nowMs);
+    if (existing != null) return GuardResult(existing, false);
+    await store.write(key, jsonEncode({'id': newId, 'startMs': nowMs}));
+    // Two isolates may have written at the same moment: the last writer wins.
+    final after = await active(nowMs);
+    if (after != null && after != newId) return GuardResult(after, false);
+    return GuardResult(newId, true);
+  }
+
+  Future<String?> active(int nowMs) async {
+    final raw = await store.read(key);
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final m = jsonDecode(raw) as Map;
+      final id = m['id'];
+      final start = (m['startMs'] as num?)?.toInt() ?? 0;
+      if (id is! String || id.isEmpty) return null;
+      if (nowMs - start > maxActive.inMilliseconds) return null;
+      return id;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> clear() => store.remove(key);
+}
+
+/// What to stop when the user cancels an SOS: live tracking timers, Firestore
+/// location writes and relay advertising register themselves here. Each
+/// isolate has its own session; a `cancel_sos` event reaches both.
+class SosSession {
+  final SosGuard guard;
+  final List<void Function()> _onCancel = [];
+  SosSession(this.guard);
+
+  void onCancel(void Function() stop) => _onCancel.add(stop);
+
+  /// Runs every registered stop once (a failing one cannot block the rest)
+  /// and clears the persisted guard.
+  Future<void> cancel() async {
+    final stops = List<void Function()>.from(_onCancel);
+    _onCancel.clear();
+    for (final s in stops) {
+      try {
+        s();
+      } catch (_) {}
+    }
+    try {
+      await guard.clear();
+    } catch (_) {}
+  }
+}

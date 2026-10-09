@@ -1,4 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+
+import '../services/emergency_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -171,7 +175,11 @@ class _EmergencyContactsScreenState extends State<EmergencyContactsScreen> {
     await prefs.setStringList('emergency_contacts', formattedList);
     if (rawPhoneList.isNotEmpty) {
       await prefs.setString("emergency_contact_number", rawPhoneList.first);
+    } else {
+      await prefs.remove("emergency_contact_number");
     }
+    // Keep the offline copy of the cloud contacts in step with the change.
+    unawaited(EmergencyService.refreshCloudContacts());
   }
 
   @override
