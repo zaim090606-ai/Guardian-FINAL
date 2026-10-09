@@ -11,10 +11,17 @@ import '../logic/error_meter.dart';
 import '../logic/motion_context.dart';
 import '../logic/pdr_config.dart';
 import '../logic/pdr_engine.dart';
+import '../logic/pdr_snapshot.dart';
+import 'prefs_kv.dart';
+
+/// A fix time later than [nowMs] is clamped to [nowMs].
+int clampFixTime(int fixMs, int nowMs) => fixMs > nowMs ? nowMs : fixMs;
 
 /// Sensor and GPS plumbing around [PdrEngine].
 ///
-/// Runs inside the foreground-service isolate. While GPS is fresh it reports
+/// The foreground-service isolate is the single owner: only it calls [start]
+/// (sensors, GPS stream, flags). The UI isolate never starts it and reads the
+/// published [PdrSnapshot] instead. While GPS is fresh it reports
 /// GPS; once fixes stop arriving it reports a dead-reckoned estimate flagged
 /// source "estimated" with a growing uncertainty radius, and goes back to GPS
 /// as soon as a usable fix returns.
@@ -24,6 +31,65 @@ class PdrService {
   PdrService._internal();
 
   final PdrConfig config = PdrConfig();
+  final PdrSettings _settings = PdrSettings(PrefsKeyValueStore());
+
+  /// Applies and persists flag changes sent by the UI isolate.
+  void setConfig(Map<dynamic, dynamic> map) {
+    config.applyMap(map);
+    unawaited(_settings.saveConfig(config));
+  }
+
+  /// What the UI isolate shows (published by the service every 2 s).
+  PdrSnapshot snapshot() {
+    final now = _now();
+    _engine.onContext(motionContext, now);
+    _updateErrorMeter();
+    final f = _engine.currentFix(now);
+    final m = errorMeter;
+    final a = _engine.lastAnchor;
+    return PdrSnapshot(
+      generatedAtMs: now,
+      simulate: _simulateGpsLoss,
+      config: config.toMap(),
+      fix: PdrSnapshot.fixToJson(f),
+      steps: _engine.steps,
+      heading: _heading,
+      lastGpsLat: _lastRealLat,
+      lastGpsLng: _lastRealLng,
+      lastGpsAccuracy: _lastGpsAccuracy,
+      lastGpsMs: _lastRealGpsMs,
+      rejectedMagSamples: rejectedMagSamples,
+      rejectedWindows: _engine.rejectedWindows,
+      offsetDeg: _engine.headingOffsetDeg,
+      offsetInvalidated: _engine.headingOffsetInvalidated,
+      strideM: _engine.currentStrideM,
+      strideCalibrated: _engine.strideCalibrated,
+      driftFraction: _engine.driftFraction,
+      motionContext: motionContext.name,
+      meter: {
+        'active': m.active,
+        'hasRun': m.hasRun,
+        'walkedM': m.walkedM,
+        'errorM': m.errorM,
+        'maxErrorM': m.maxErrorM,
+        'percent': m.percent,
+        'summary': m.summary(),
+        'hasTruth': m.hasTruth,
+        'truthLat': m.truthLat,
+        'truthLng': m.truthLng,
+      },
+      lastAnchor: a == null
+          ? null
+          : {
+              'atMs': a.atMs,
+              'ageS': a.anchorAgeS,
+              'before': a.radiusBeforeM,
+              'after': a.radiusAfterM,
+              'snapped': a.snapped,
+              'simulated': a.simulated,
+            },
+    );
+  }
   late final PdrEngine _engine = PdrEngine(config: config);
   int rejectedMagSamples = 0;
 
@@ -53,6 +119,7 @@ class PdrService {
   set simulateGpsLoss(bool on) {
     if (on == _simulateGpsLoss) return;
     _simulateGpsLoss = on;
+    unawaited(_settings.saveSimulate(on));
     if (on) {
       _stepsAtLoss = _engine.steps;
       errorMeter.start(_now());
@@ -136,6 +203,14 @@ class PdrService {
     if (_running) return;
     _running = true;
 
+    // A restart never keeps GPS loss simulated; the flags come back as saved.
+    try {
+      await _settings.loadInto(config);
+      await _settings.resetSimulateOnStart();
+    } catch (e) {
+      debugPrint('PDR settings unreadable, using defaults: $e');
+    }
+
     try {
       _linearSub = userAccelerometerEventStream(
         samplingPeriod: SensorInterval.gameInterval,
@@ -182,10 +257,12 @@ class PdrService {
   }
 
   Future<void> _subscribeGps() async {
+    if (!_running) return;
     await _gpsSub?.cancel();
     _gpsSub = null;
     try {
       final perm = await Geolocator.checkPermission();
+      if (!_running) return; // stop() ran while we were waiting
       if (perm == LocationPermission.denied ||
           perm == LocationPermission.deniedForever) {
         debugPrint('PDR: location permission missing, will retry');
@@ -204,8 +281,17 @@ class PdrService {
           debugPrint('PDR GPS stream error: $e');
           _scheduleGpsRetry();
         },
+        onDone: () {
+          // The stream ended without an error: resubscribe.
+          debugPrint('PDR GPS stream ended, will retry');
+          _scheduleGpsRetry();
+        },
         cancelOnError: true,
       );
+      if (!_running) {
+        await _gpsSub?.cancel();
+        _gpsSub = null;
+      }
     } catch (e) {
       debugPrint('PDR GPS subscribe failed: $e');
       _scheduleGpsRetry();
@@ -222,14 +308,16 @@ class PdrService {
 
   /// Feeds a GPS position (from the stream or from a one-shot request).
   void feedGps(Position p) {
+    // A timestamp in the future (clock skew) would keep the fix "fresh"
+    // forever, so it is clamped to now.
+    final tMs = clampFixTime(p.timestamp.millisecondsSinceEpoch, _now());
     if (simulateGpsLoss) {
       // Silent ground truth: used only to measure the error.
-      errorMeter.onTruth(
-          p.latitude, p.longitude, p.timestamp.millisecondsSinceEpoch);
+      errorMeter.onTruth(p.latitude, p.longitude, tMs);
       return;
     }
     _rememberLastKnown(p);
-    _lastRealGpsMs = p.timestamp.millisecondsSinceEpoch;
+    _lastRealGpsMs = tMs;
     _lastGpsAccuracy = p.accuracy;
     _lastRealLat = p.latitude;
     _lastRealLng = p.longitude;
@@ -237,7 +325,7 @@ class PdrService {
       p.latitude,
       p.longitude,
       p.accuracy,
-      p.timestamp.millisecondsSinceEpoch,
+      tMs,
       speedMps: p.speed > 0 ? p.speed : null,
       courseDeg: p.heading >= 0 ? p.heading : null,
       speedAccuracyMps: p.speedAccuracy > 0 ? p.speedAccuracy : null,
@@ -257,7 +345,7 @@ class PdrService {
     _lastSavedMs = now;
     SharedPreferences.getInstance().then((prefs) => prefs.setString(
           _lastKnownKey,
-          '${p.latitude},${p.longitude},${p.accuracy},${p.timestamp.millisecondsSinceEpoch}',
+          '${p.latitude},${p.longitude},${p.accuracy},${clampFixTime(p.timestamp.millisecondsSinceEpoch, now)}',
         ));
   }
 

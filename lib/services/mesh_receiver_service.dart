@@ -11,7 +11,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../logic/relay_policy.dart';
 import '../logic/sos_packet.dart';
 import 'diagnostics_hub.dart';
-import 'pdr_services.dart';
 import 'relay_service.dart';
 
 /// Receiver side of the mesh. Discovers Guardian devices that are advertising
@@ -169,7 +168,8 @@ class MeshReceiverService {
   /// a real, accurate, fresh GPS fix and is not simulating GPS loss.
   void _sendBeacon(String endpointId) {
     try {
-      final b = PdrService().beaconForSharing();
+      final b = DiagnosticsHub.pdrSnapshot()
+          ?.beaconForSharing(DateTime.now().millisecondsSinceEpoch);
       if (b == null) {
         DiagnosticsHub.instance.relayEvent('No anchor beacon offered (no good GPS fix)');
         return;

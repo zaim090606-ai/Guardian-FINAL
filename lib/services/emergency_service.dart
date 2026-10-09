@@ -13,11 +13,13 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../logic/pdr_engine.dart';
+import '../logic/pdr_snapshot.dart';
 import '../logic/sos_dispatcher.dart';
 import '../logic/sos_guard.dart';
 import '../logic/sos_packet.dart';
 import 'ai_service.dart';
 import 'audio_recorder_service.dart';
+import 'diagnostics_hub.dart';
 import 'pdr_services.dart';
 import 'mesh_receiver_service.dart';
 import 'prefs_kv.dart';
@@ -283,21 +285,51 @@ class EmergencyService {
 
   // ---------------------------------------------------------------- location
 
+  /// True in the foreground-service isolate, which owns PDR. The UI isolate
+  /// reads the service's published snapshot instead.
+  static bool isServiceIsolate = false;
+
   static Future<bool> _simulatedNow() async {
     try {
-      return PdrService().simulateGpsLoss;
+      if (isServiceIsolate) return PdrService().simulateGpsLoss;
+      final snap = DiagnosticsHub.pdrSnapshot();
+      if (snap != null && snap.isFresh(DateTime.now().millisecondsSinceEpoch)) {
+        return snap.simulate;
+      }
+      return await PdrSettings(PrefsKeyValueStore()).readSimulate();
     } catch (_) {
       return false;
     }
   }
 
-  /// The PDR estimate if there is one, otherwise the stored last real fix.
+  /// The PDR estimate if there is one, otherwise the stored last real fix,
+  /// otherwise the platform's last known position. Never waits for a new GPS
+  /// reading.
   static Future<LocationFix?> _defaultLocationNow() async {
-    final pdr = PdrService();
-    final fix = pdr.currentFix();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    LocationFix? fix;
+    if (isServiceIsolate) {
+      fix = PdrService().currentFix();
+    } else {
+      fix = DiagnosticsHub.pdrSnapshot()?.locationFix(now);
+    }
     if (fix != null) return fix;
-    if (pdr.simulateGpsLoss) return null;
-    return PdrService.loadLastKnown();
+    if (await _simulatedNow()) return null;
+    fix = await PdrService.loadLastKnown();
+    if (fix != null) return fix;
+    try {
+      final last = await Geolocator.getLastKnownPosition();
+      if (last != null) {
+        return LocationFix(
+          lat: last.latitude,
+          lng: last.longitude,
+          source: 'last_known',
+          uncertaintyM: last.accuracy,
+          timeMs: clampFixTime(last.timestamp.millisecondsSinceEpoch, now),
+        );
+      }
+    } catch (_) {}
+    return null;
   }
 
   /// After the alert is out, tries for a fresh GPS reading (3 s) and updates

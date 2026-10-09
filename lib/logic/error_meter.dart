@@ -3,6 +3,10 @@ import 'pdr_engine.dart' show distanceM;
 /// Ground-truth error meter. While "Simulate GPS loss" is on, the real GPS is
 /// still read silently; it is compared with the dead-reckoned estimate and is
 /// never used to compute that estimate.
+///
+/// The "truth" is itself a GPS reading with its own error (typically 3-10 m
+/// outdoors, more near buildings), and it can be up to [maxTruthAgeMs] old, so
+/// small errors measured here are not exact.
 class ErrorMeter {
   /// Truth older than this is not compared (the walker has moved on).
   static const int maxTruthAgeMs = 15000;

@@ -5,6 +5,7 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 
 import '../logic/anchor_beacon.dart';
 import '../logic/countdown.dart';
+import '../logic/pdr_snapshot.dart';
 import 'pdr_services.dart';
 
 /// Live counters for the Diagnostics screen. Relay counters are measured in
@@ -18,6 +19,9 @@ class DiagnosticsHub {
   /// Latest snapshot received from the service isolate (UI side).
   static final ValueNotifier<Map<String, dynamic>> remote =
       ValueNotifier<Map<String, dynamic>>(const {});
+
+  /// UI isolate: the PDR snapshot the service published last, or null.
+  static PdrSnapshot? pdrSnapshot() => PdrSnapshot.fromJson(remote.value['pdr']);
 
   final EventLog relayEvents = EventLog(capacity: 10);
 
@@ -75,7 +79,7 @@ class DiagnosticsHub {
         'lastLabel': lastLabel,
         'lastScore': lastScore,
         'lastDetectionMs': lastDetectionMs,
-        'motionContext': PdrService().motionContext.name,
+        'pdr': PdrService().snapshot().toJson(),
       };
 
   /// Service isolate: push snapshots to the UI.

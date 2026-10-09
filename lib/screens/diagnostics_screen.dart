@@ -3,17 +3,20 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 
-import '../logic/anchor_beacon.dart';
 import '../logic/pdr_config.dart';
 import '../logic/pdr_engine.dart' show formatAge;
+import '../logic/pdr_snapshot.dart';
 import '../logic/sos_dispatcher.dart';
 import '../services/diagnostics_hub.dart';
 import '../services/emergency_service.dart';
-import '../services/pdr_services.dart';
 import '../services/relay_service.dart';
 
 /// Shows what the offline features are doing right now so they can be checked
 /// on a single phone. Anything triggered from here is labelled SIMULATED.
+///
+/// PDR runs in the background service; everything PDR-related here comes from
+/// the snapshot the service publishes every 2 s, and switches are sent to it
+/// as events. Relay numbers are measured in this (UI) isolate.
 class DiagnosticsScreen extends StatefulWidget {
   const DiagnosticsScreen({super.key});
 
@@ -48,17 +51,14 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
   }
 
   void _setSimulation(bool on) {
-    PdrService().simulateGpsLoss = on;
     try {
       FlutterBackgroundService().invoke('sim_gps_loss', {'enabled': on});
     } catch (_) {}
     setState(() {});
   }
 
-  void _setFlag(String name, bool on) {
-    final cfg = PdrService().config;
-    final map = cfg.toMap()..[name] = on;
-    cfg.applyMap(map);
+  void _setFlag(PdrSnapshot snap, String name, bool on) {
+    final map = {...PdrConfig().toMap(), ...snap.config}..[name] = on;
     try {
       FlutterBackgroundService().invoke('pdr_config', map);
     } catch (_) {}
@@ -66,7 +66,7 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
   }
 
   void _setAllFlags(bool on) {
-    final cfg = PdrService().config..setAll(on);
+    final cfg = PdrConfig()..setAll(on);
     try {
       FlutterBackgroundService().invoke('pdr_config', cfg.toMap());
     } catch (_) {}
@@ -77,29 +77,33 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
 
   /// SIMULATED: pretends a nearby phone with good GPS is standing at the real
   /// GPS position (ground truth read while GPS loss is simulated).
-  void _sendTestAnchor() {
-    final pdr = PdrService();
-    final m = pdr.errorMeter;
-    if (!pdr.simulateGpsLoss || !m.hasTruth) {
+  void _sendTestAnchor(PdrSnapshot? snap) {
+    final m = snap?.meter ?? const {};
+    if (snap == null || !snap.simulate || m['hasTruth'] != true) {
       setState(() => _anchorMessage =
           'SIMULATED anchor needs "Simulate GPS loss" ON and a real GPS reading.');
       return;
     }
     final now = DateTime.now().millisecondsSinceEpoch;
-    final b = AnchorBeacon(
-        lat: m.truthLat!, lng: m.truthLng!, accuracyM: 10, timestampMs: now);
-    final e = pdr.onAnchor(b, simulated: true);
     try {
-      FlutterBackgroundService().invoke('test_anchor', b.toJson());
-    } catch (_) {}
-    setState(() => _anchorMessage = e == null
-        ? 'SIMULATED anchor not used (flag off, or the estimate is still GPS-fresh).'
-        : 'SIMULATED anchor used: radius ${e.radiusBeforeM.round()} -> ${e.radiusAfterM.round()} m');
+      FlutterBackgroundService().invoke('test_anchor', {
+        'type': 'anchor_beacon',
+        'lat': m['truthLat'],
+        'lng': m['truthLng'],
+        'accuracyM': 10.0,
+        'timestamp': now,
+        'source': 'gps',
+      });
+      setState(() => _anchorMessage =
+          'SIMULATED anchor sent to the service; see "Last anchor" in a moment.');
+    } catch (e) {
+      setState(() => _anchorMessage = 'Could not reach the service: $e');
+    }
   }
 
-  Future<void> _sendTestRelay() async {
+  Future<void> _sendTestRelay(PdrSnapshot? snap) async {
     try {
-      final fix = PdrService().currentFix();
+      final fix = snap?.locationFix(DateTime.now().millisecondsSinceEpoch);
       final ok = await RelayService()
           .sendTestPacket(lat: fix?.lat ?? 0, lng: fix?.lng ?? 0);
       setState(() => _testMessage = ok
@@ -118,17 +122,21 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final pdr = PdrService();
-    final fix = pdr.currentFix();
-    final simulated = pdr.simulateGpsLoss;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
     final remote = DiagnosticsHub.remote.value;
     final hub = DiagnosticsHub.instance;
+    final snap = DiagnosticsHub.pdrSnapshot();
+    final running = snap != null && snap.isFresh(nowMs);
+    final fix = running ? snap.locationFix(nowMs) : null;
+    final simulated = running && snap.simulate;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Diagnostics')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          if (!running)
+            _banner('PDR not running: the background service is not reporting'),
           if (simulated) _banner('SIMULATED: GPS is being ignored on purpose'),
           _section('Location', [
             _row('Source', fix == null ? 'none yet' : fix.source.toUpperCase()),
@@ -136,22 +144,28 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
                 fix == null ? '-' : '+/- ${fix.uncertaintyM.toStringAsFixed(1)} m'),
             if (fix != null && fix.source == 'estimated')
               _row('Age since last GPS fix', formatAge(fix.ageSinceGpsS)),
-            _row('Last real GPS fix',
-                pdr.lastGpsAgeMs == null ? 'never' : '${(pdr.lastGpsAgeMs! / 1000).round()} s ago'),
-            _row('Steps counted', '${pdr.steps}'),
-            _row('Heading',
-                pdr.heading == null ? 'no compass data' : '${pdr.heading!.round()} deg'),
+            _row(
+                'Last real GPS fix',
+                !running || snap.lastGpsMs == null
+                    ? 'never'
+                    : '${((nowMs - snap.lastGpsMs!) / 1000).round()} s ago'),
+            _row('Steps counted', running ? '${snap.steps}' : '-'),
+            _row(
+                'Heading',
+                !running || snap.heading == null
+                    ? 'no compass data'
+                    : '${snap.heading!.round()} deg'),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: const Text('Simulate GPS loss'),
-              subtitle: const Text('Ignores the GPS stream so dead reckoning can be shown indoors. Walk with the phone in your hand.'),
+              subtitle: const Text('Ignores the GPS stream so dead reckoning can be shown indoors. Walk with the phone in your hand. Switches off again when the service restarts.'),
               value: simulated,
-              onChanged: _setSimulation,
+              onChanged: running ? _setSimulation : null,
             ),
           ]),
-          _section('Dead-reckoning error vs real GPS', _groundTruth(pdr)),
-          _section('PDR improvements', _flags(pdr)),
-          _section('Motion context and anchors', _contextAndAnchors(pdr, remote)),
+          _section('Dead-reckoning error vs real GPS', _groundTruth(snap, running)),
+          _section('PDR improvements', _flags(snap, running)),
+          _section('Motion context and anchors', _contextAndAnchors(snap, running, nowMs)),
           _section('Mesh relay', [
             _row('State', hub.relayState),
             if (hub.relayUnavailableReason != null)
@@ -165,7 +179,7 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
                 '${hub.queued} / ${hub.uploaded} / ${hub.pending}'),
             const SizedBox(height: 8),
             OutlinedButton(
-              onPressed: _sendTestRelay,
+              onPressed: () => _sendTestRelay(snap),
               child: const Text('Send test SOS via relay (SIMULATED)'),
             ),
             if (_testMessage != null)
@@ -209,98 +223,115 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
     );
   }
 
-  List<Widget> _groundTruth(PdrService pdr) {
-    final m = pdr.errorMeter;
-    String metres(double? v) => v == null ? '-' : '${v.toStringAsFixed(1)} m';
+  List<Widget> _groundTruth(PdrSnapshot? snap, bool running) {
+    final m = running ? snap!.meter : const <String, dynamic>{};
+    String metres(num? v) => v == null ? '-' : '${v.toStringAsFixed(1)} m';
+    final active = m['active'] == true;
+    final hasRun = m['hasRun'] == true;
+    final percent = (m['percent'] as num?);
     return [
-      if (m.active)
+      if (active)
         _banner('SIMULATED GPS loss: real GPS is read only to measure the error'),
-      _row('Walked since loss (steps x stride)', '${m.walkedM.toStringAsFixed(0)} m'),
-      _row('Current error vs real GPS', metres(m.errorM)),
-      _row('Max error', metres(m.hasRun ? m.maxErrorM : null)),
+      _row('Walked since loss (steps x stride)',
+          '${((m['walkedM'] as num?) ?? 0).toStringAsFixed(0)} m'),
+      _row('Current error vs real GPS', metres(m['errorM'] as num?)),
+      _row('Max error', metres(hasRun ? m['maxErrorM'] as num? : null)),
       _row('Error / distance',
-          m.percent == null ? '-' : '${m.percent!.toStringAsFixed(0)} %'),
+          percent == null ? '-' : '${percent.toStringAsFixed(0)} %'),
       const SizedBox(height: 6),
       Container(
         padding: const EdgeInsets.all(10),
         color: Colors.blueGrey.shade50,
         child: SelectableText(
-          'Run summary${m.active ? ' (running, SIMULATED loss)' : ''}: ${m.summary()}\n'
-          'Flags: ${_flagLine(pdr.config)}',
+          'Run summary${active ? ' (running, SIMULATED loss)' : ''}: '
+          '${m['summary'] ?? 'PDR not running'}\n'
+          'Flags: ${_flagLine(snap?.config ?? const {})}',
           style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
         ),
       ),
+      const Text(
+          'The truth is a GPS reading with its own error of several metres.',
+          style: TextStyle(fontSize: 11)),
     ];
   }
 
-  String _flagLine(PdrConfig c) => c
-      .toMap()
-      .entries
-      .map((e) => '${e.key}=${e.value ? "ON" : "OFF"}')
-      .join(' ');
+  String _flagLine(Map<String, bool> c) =>
+      c.entries.map((e) => '${e.key}=${e.value ? "ON" : "OFF"}').join(' ');
 
-  List<Widget> _flags(PdrService pdr) {
-    final c = pdr.config;
-    final eng = pdr.engine;
-    Widget sw(String title, String key, bool value, String sub) =>
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          dense: true,
-          title: Text('$title: ${value ? "ON" : "OFF"}'),
-          subtitle: Text(sub, style: const TextStyle(fontSize: 11)),
-          value: value,
-          onChanged: (v) => _setFlag(key, v),
-        );
+  List<Widget> _flags(PdrSnapshot? snap, bool running) {
+    final c = snap?.config ?? const <String, bool>{};
+    Widget sw(String title, String key, String sub) {
+      final value = c[key] ?? true;
+      return SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        dense: true,
+        title: Text('$title: ${value ? "ON" : "OFF"}'),
+        subtitle: Text(sub, style: const TextStyle(fontSize: 11)),
+        value: value,
+        onChanged: running ? (v) => _setFlag(snap!, key, v) : null,
+      );
+    }
+
+    final offset = snap?.offsetDeg;
     return [
       Row(children: [
-        OutlinedButton(onPressed: () => _setAllFlags(true), child: const Text('All ON')),
+        OutlinedButton(
+            onPressed: running ? () => _setAllFlags(true) : null,
+            child: const Text('All ON')),
         const SizedBox(width: 8),
-        OutlinedButton(onPressed: () => _setAllFlags(false), child: const Text('All OFF')),
+        OutlinedButton(
+            onPressed: running ? () => _setAllFlags(false) : null,
+            child: const Text('All OFF')),
       ]),
-      sw('Compass gating', 'compassGating', c.compassGating,
+      sw('Compass gating', 'compassGating',
           'Ignore magnetometer samples outside 25-65 uT'),
-      sw('Heading offset', 'headingOffset', c.headingOffset,
+      sw('Heading offset', 'headingOffset',
           'Learn GPS course minus compass while GPS is good'),
-      sw('Stride learning', 'strideLearning', c.strideLearning,
+      sw('Stride learning', 'strideLearning',
           'Learn stride from GPS distance / steps'),
-      sw('Microphone context', 'microphoneContext', c.microphoneContext,
+      sw('Microphone context', 'microphoneContext',
           'Vehicle / stationary from YAMNet sound labels'),
-      sw('Anchors', 'anchors', c.anchors,
+      sw('Anchors', 'anchors',
           'Use positions of nearby Guardian phones with good GPS'),
       const Divider(),
       _row(
           'Heading offset learned',
-          eng.headingOffsetDeg == null
-              ? (eng.headingOffsetInvalidated ? 'invalid (phone moved)' : 'not yet')
-              : '${eng.headingOffsetDeg!.toStringAsFixed(1)} deg'),
-      _row('Stride in use',
-          '${eng.currentStrideM.toStringAsFixed(2)} m${eng.strideCalibrated ? " (learned)" : " (default)"}'),
-      _row('Drift fraction (assumption)', eng.driftFraction.toStringAsFixed(2)),
-      _row('Compass samples rejected', '${pdr.rejectedMagSamples}'),
+          !running
+              ? '-'
+              : offset == null
+                  ? (snap!.offsetInvalidated ? 'invalid (phone moved)' : 'not yet')
+                  : '${offset.toStringAsFixed(1)} deg'),
+      _row(
+          'Stride in use',
+          !running
+              ? '-'
+              : '${snap!.strideM.toStringAsFixed(2)} m${snap.strideCalibrated ? " (learned)" : " (default)"}'),
+      _row('Drift fraction (assumption)',
+          running ? snap!.driftFraction.toStringAsFixed(2) : '-'),
+      _row('Compass samples rejected', running ? '${snap!.rejectedMagSamples}' : '-'),
+      _row('Learning windows rejected', running ? '${snap!.rejectedWindows}' : '-'),
     ];
   }
 
-  List<Widget> _contextAndAnchors(PdrService pdr, Map<String, dynamic> remote) {
-    final a = pdr.lastAnchor;
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final local = pdr.motionContext.name;
-    final svc = remote['motionContext'];
+  List<Widget> _contextAndAnchors(PdrSnapshot? snap, bool running, int now) {
+    final a = running ? snap!.lastAnchor : null;
+    num n(String k) => (a?[k] as num?) ?? 0;
     return [
-      _row('Motion context (app / service)', '$local / ${svc ?? "-"}'),
+      _row('Motion context (service)', running ? snap!.motionContext : '-'),
       _row(
           'Last anchor',
           a == null
               ? 'none'
-              : '${formatAge(((now - a.atMs) / 1000).round())}${a.simulated ? " (SIMULATED)" : ""}'),
+              : '${formatAge(((now - n('atMs').toInt()) / 1000).round())}${a['simulated'] == true ? " (SIMULATED)" : ""}'),
       if (a != null) ...[
-        _row('Anchor age when used', '${a.anchorAgeS} s'),
+        _row('Anchor age when used', '${n('ageS').toInt()} s'),
         _row('Radius before -> after',
-            '${a.radiusBeforeM.round()} m -> ${a.radiusAfterM.round()} m'),
-        _row('Action', a.snapped ? 'snapped to anchor' : 'weighted'),
+            '${n('before').round()} m -> ${n('after').round()} m'),
+        _row('Action', a['snapped'] == true ? 'snapped to anchor' : 'weighted'),
       ],
       const SizedBox(height: 6),
       OutlinedButton(
-        onPressed: _sendTestAnchor,
+        onPressed: running ? () => _sendTestAnchor(snap) : null,
         child: const Text('Send test anchor (SIMULATED beacon)'),
       ),
       if (_anchorMessage != null)

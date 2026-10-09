@@ -80,7 +80,8 @@ Future<void> _startGuardian() async {
     await MeshReceiverService().startEmergencyListener();
     unawaited(EmergencyService.refreshCloudContacts());
     await VoiceService.startListening();
-    await PdrService().start();
+    // PDR (sensors, GPS stream, flags) is owned by the service isolate; this
+    // isolate only shows the snapshot it publishes.
   } catch (e) {
     debugPrint('Guardian start-up error: $e');
   }
@@ -210,7 +211,7 @@ void onStartService(ServiceInstance service) async {
     PdrService().simulateGpsLoss = event?['enabled'] == true;
   });
   service.on('pdr_config').listen((event) {
-    if (event != null) PdrService().config.applyMap(event);
+    if (event != null) PdrService().setConfig(event);
   });
   service.on('test_anchor').listen((event) {
     if (event == null) return;
@@ -222,6 +223,7 @@ void onStartService(ServiceInstance service) async {
     final b = parseBeacon(jsonEncode(event), DateTime.now().millisecondsSinceEpoch);
     if (b != null) PdrService().onAnchor(b);
   });
+  EmergencyService.isServiceIsolate = true;
   EmergencyService.meshOffer = RelayBridge.serviceOffer(service);
   // The user cancelled: stop this isolate's tracking timers, Firestore
   // location writes and clear the active-SOS guard (also cancels a countdown).
@@ -276,6 +278,32 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       navigatorKey: navigatorKey,
       debugShowCheckedModeBanner: false,
+      // Visible on every screen while GPS loss is simulated.
+      builder: (context, child) => Column(children: [
+        ValueListenableBuilder<Map<String, dynamic>>(
+          valueListenable: DiagnosticsHub.remote,
+          builder: (_, __, ___) {
+            final snap = DiagnosticsHub.pdrSnapshot();
+            final on = snap != null &&
+                snap.isFresh(DateTime.now().millisecondsSinceEpoch) &&
+                snap.simulate;
+            if (!on) return const SizedBox.shrink();
+            return Material(
+              color: Colors.orange.shade300,
+              child: const SafeArea(
+                bottom: false,
+                child: Padding(
+                  padding: EdgeInsets.all(6),
+                  child: Text('SIMULATED: GPS is being ignored on purpose',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+              ),
+            );
+          },
+        ),
+        Expanded(child: child ?? const SizedBox.shrink()),
+      ]),
       title: 'Guardian',
       theme: ThemeData(
         brightness: Brightness.light,
