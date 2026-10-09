@@ -32,6 +32,7 @@ class MeshReceiverService {
 
   late final RelayHandler _handler = RelayHandler(
     maxHops: maxHops,
+    minIdLength: 20,
     nowMs: () => DateTime.now().millisecondsSinceEpoch,
     upload: _uploadToFirestore,
     forward: (p) async {

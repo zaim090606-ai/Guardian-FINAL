@@ -142,6 +142,10 @@ enum RelayOutcome { invalid, duplicate, uploaded, queued, rateLimited, queueFull
 /// not succeed, queue and forward to further peers while the hop limit allows.
 class RelayHandler {
   final int maxHops;
+
+  /// Shortest accepted alert id. Firestore rules need 20+ characters, so a
+  /// shorter id could never be uploaded and would sit in the queue forever.
+  final int minIdLength;
   final SeenCache seen;
   final PacketQueue queue;
   final int Function() nowMs;
@@ -163,6 +167,7 @@ class RelayHandler {
     SeenCache? seen,
     PacketQueue? queue,
     this.maxHops = 5,
+    this.minIdLength = 1,
     SlidingRateLimiter? perEndpoint,
     SlidingRateLimiter? globalUnique,
   })  : seen = seen ?? SeenCache(),
@@ -185,7 +190,8 @@ class RelayHandler {
   }
 
   Future<RelayOutcome> handle(SosPacket packet) async {
-    if (packet.validate(nowMs: nowMs(), maxHops: maxHops) != null) {
+    if (packet.id.length < minIdLength ||
+        packet.validate(nowMs: nowMs(), maxHops: maxHops) != null) {
       return RelayOutcome.invalid;
     }
     if (seen.contains(packet.id)) return RelayOutcome.duplicate;
@@ -213,10 +219,17 @@ class RelayHandler {
     return RelayOutcome.queued;
   }
 
-  /// Retries every queued packet; returns how many were uploaded.
+  /// Retries every queued packet; returns how many were uploaded. Packets
+  /// that are no longer valid (older than 2 h, bad id) are dropped first, so
+  /// stale or hostile entries cannot fill the queue.
   Future<int> flush() async {
     int done = 0;
     for (final p in List<SosPacket>.from(queue.items)) {
+      if (p.id.length < minIdLength ||
+          p.validate(nowMs: nowMs(), maxHops: maxHops) != null) {
+        queue.remove(p.id);
+        continue;
+      }
       bool ok = false;
       try {
         ok = await upload(p);

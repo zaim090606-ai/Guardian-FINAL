@@ -123,4 +123,23 @@ void main() {
     expect(l.allow('k', 2), isFalse);
     expect(l.allow('k', 60001), isTrue);
   });
+
+  test('flush drops queued packets that expired while waiting', () async {
+    final h = make();
+    expect(await h.handleRaw(json('slow1', ts: now - 3600000), endpointId: 'A'),
+        RelayOutcome.queued);
+    clock = now + 2 * 3600000; // 3 h old now
+    expect(await h.flush(), 0);
+    expect(h.queue.length, 0);
+  });
+
+  test('ids shorter than minIdLength are rejected (rules need 20+)', () async {
+    final h = RelayHandler(
+        upload: (p) async => false,
+        forward: (p) async {},
+        nowMs: () => clock,
+        minIdLength: 20);
+    expect(await h.handleRaw(json('short'), endpointId: 'A'), RelayOutcome.invalid);
+    expect(await h.handleRaw(json('a' * 20), endpointId: 'B'), RelayOutcome.queued);
+  });
 }
