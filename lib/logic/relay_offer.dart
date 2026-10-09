@@ -27,7 +27,7 @@ class RelayOfferClient {
   RelayOfferClient({
     required this.send,
     required this.acks,
-    this.timeout = const Duration(seconds: 3),
+    this.timeout = const Duration(seconds: 8),
   });
 
   /// True when the UI isolate started advertising. Throws [RelayUnavailable]
