@@ -177,6 +177,7 @@ class PdrService {
       lng: _lastRealLng!,
       accuracyM: acc,
       timestampMs: _lastRealGpsMs!,
+      ageS: age / 1000.0,
     );
   }
 

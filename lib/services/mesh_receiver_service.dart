@@ -39,6 +39,7 @@ class MeshReceiverService {
   );
 
   final Set<String> _requested = {};
+  final BeaconLimiter _beaconLimiter = BeaconLimiter();
   StreamSubscription<List<ConnectivityResult>>? _connSub;
   Timer? _retryTimer;
   bool _isDiscovering = false;
@@ -137,7 +138,7 @@ class MeshReceiverService {
             onPayLoadRecieved: (String from, Payload payload) {
               final bytes = payload.bytes;
               if (payload.type == PayloadType.BYTES && bytes != null) {
-                _onPayload(bytes);
+                _onPayload(bytes, from);
               }
             },
             onPayloadTransferUpdate:
@@ -147,7 +148,7 @@ class MeshReceiverService {
         onConnectionResult: (String id, Status status) {
           if (status == Status.CONNECTED) {
             DiagnosticsHub.instance.connectedPeers++;
-            _sendBeacon(id);
+            // No beacon yet: a peer must first send a valid SOS packet.
           } else {
             _requested.remove(endpointId);
           }
@@ -182,11 +183,19 @@ class MeshReceiverService {
     }
   }
 
-  Future<void> _onPayload(List<int> bytes) async {
+  Future<void> _onPayload(List<int> bytes, String endpointId) async {
     try {
       final h = DiagnosticsHub.instance;
       h.received++;
-      final outcome = await _handler.handleRaw(utf8.decode(bytes));
+      final outcome =
+          await _handler.handleRaw(utf8.decode(bytes), endpointId: endpointId);
+      // Only an endpoint that just sent a valid SOS packet gets a beacon, and
+      // at most once every 30 s.
+      if (outcome != RelayOutcome.invalid && outcome != RelayOutcome.rateLimited) {
+        if (_beaconLimiter.allow(endpointId, DateTime.now().millisecondsSinceEpoch)) {
+          _sendBeacon(endpointId);
+        }
+      }
       switch (outcome) {
         case RelayOutcome.uploaded:
           h.uploaded++;
@@ -194,6 +203,8 @@ class MeshReceiverService {
           h.queued++;
         case RelayOutcome.invalid:
         case RelayOutcome.duplicate:
+        case RelayOutcome.rateLimited:
+        case RelayOutcome.queueFull:
           break;
       }
       h.pending = _handler.queue.length;

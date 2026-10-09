@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'dart:math';
 
 import 'anchor_beacon.dart';
@@ -228,6 +229,10 @@ class PdrEngine {
 
   AnchorEvent? _lastAnchor;
   AnchorBeacon? _anchorBeacon;
+  final LinkedHashSet<String> _usedBeacons = LinkedHashSet<String>();
+
+  /// Beacons refused because they were too far from a confident estimate.
+  int rejectedAnchors = 0;
 
   // Learned from GPS.
   double _stride;
@@ -282,11 +287,21 @@ class PdrEngine {
   /// no estimate yet, or our own GPS is fresh).
   AnchorEvent? onAnchor(AnchorBeacon b, int nowMs, {bool simulated = false}) {
     if (!config.anchors || _lat == null || _lastGpsMs == null) return null;
-    if (b.validate(nowMs: nowMs) != null) return null;
-    final ageMs = max(0, nowMs - b.timestampMs);
+    if (b.validate() != null) return null;
+    // The helper's age at send time plus the time since we received it.
+    final ageMs = b.ageMsAt(nowMs);
     if (ageMs > anchorMaxAgeMs) return null;
     if (nowMs - _lastGpsMs! <= staleAfterMs) return null;
+    // One measurement is applied once: repeating it must not shrink the radius.
+    if (_usedBeacons.contains(b.dedupeKey)) return null;
     final before = uncertaintyAt(nowMs);
+    if (before < anchorConfidentSigmaM &&
+        distanceM(_lat!, _lng!, b.lat, b.lng) > anchorMaxJumpM) {
+      rejectedAnchors++;
+      return null;
+    }
+    _usedBeacons.add(b.dedupeKey);
+    if (_usedBeacons.length > 20) _usedBeacons.remove(_usedBeacons.first);
     final r = fuseAnchor(
       estLat: _lat!,
       estLng: _lng!,
@@ -294,6 +309,7 @@ class PdrEngine {
       anchorLat: b.lat,
       anchorLng: b.lng,
       anchorAccuracyM: b.accuracyM,
+      anchorAgeS: ageMs / 1000.0,
     );
     _lat = r.lat;
     _lng = r.lng;
@@ -618,7 +634,7 @@ class PdrEngine {
       anchorUsed: _anchorBeacon != null,
       anchorAgeS: _anchorBeacon == null
           ? null
-          : (max(0, nowMs - _anchorBeacon!.timestampMs) / 1000).round(),
+          : (_anchorBeacon!.ageMsAt(nowMs) / 1000).round(),
       anchorRadiusM: _anchorBeacon == null ? null : _lastAnchor?.radiusAfterM,
     );
   }

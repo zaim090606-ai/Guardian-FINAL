@@ -169,7 +169,12 @@ class PdrSnapshot {
         fixAgeMs: nowMs - ms)) {
       return null;
     }
-    return AnchorBeacon(lat: lat, lng: lng, accuracyM: acc, timestampMs: ms);
+    return AnchorBeacon(
+        lat: lat,
+        lng: lng,
+        accuracyM: acc,
+        timestampMs: ms,
+        ageS: (nowMs - ms) / 1000.0);
   }
 }
 

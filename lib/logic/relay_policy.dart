@@ -19,6 +19,48 @@ class SeenCache {
   }
 
   bool contains(String id) => _ids.contains(id);
+
+  /// Forgets [id] again (a packet that could not be kept must be acceptable
+  /// later).
+  void remove(String id) => _ids.remove(id);
+}
+
+/// At most [max] events per [window] for each key (an endpoint, or one shared
+/// key for a global limit).
+class SlidingRateLimiter {
+  final int max;
+  final Duration window;
+  final Map<String, List<int>> _hits = {};
+  SlidingRateLimiter({required this.max, this.window = const Duration(minutes: 1)});
+
+  /// Records an event and returns true while the key is within its limit.
+  bool allow(String key, int nowMs) {
+    final list = _hits.putIfAbsent(key, () => []);
+    list.removeWhere((t) => nowMs - t >= window.inMilliseconds);
+    if (list.length >= max) return false;
+    list.add(nowMs);
+    if (_hits.length > 200) {
+      _hits.removeWhere((k, v) => v.every((t) => nowMs - t >= window.inMilliseconds));
+    }
+    return true;
+  }
+}
+
+/// Limits how often one endpoint may hand out beacons (helper side).
+class BeaconLimiter {
+  final Duration interval;
+  final Map<String, int> _last = {};
+  BeaconLimiter({this.interval = const Duration(seconds: 30)});
+
+  /// True at most once per [interval] for each endpoint.
+  bool allow(String endpointId, int nowMs) {
+    final last = _last[endpointId];
+    if (last != null && nowMs - last < interval.inMilliseconds) return false;
+    _last[endpointId] = nowMs;
+    return true;
+  }
+
+  void forget(String endpointId) => _last.remove(endpointId);
 }
 
 /// Ids of SOS packets this phone created, kept across restarts so a packet
@@ -61,10 +103,14 @@ class PacketQueue {
   List<SosPacket> get items => List.unmodifiable(_items);
   int get length => _items.length;
 
+  bool get isFull => _items.length >= capacity;
+
+  /// Adds [p]; false for a duplicate id or when the queue is full. A full
+  /// queue never evicts packets that are already waiting.
   bool add(SosPacket p) {
     if (_items.any((e) => e.id == p.id)) return false;
+    if (isFull) return false;
     _items.add(p);
-    if (_items.length > capacity) _items.removeAt(0);
     return true;
   }
 
@@ -90,7 +136,7 @@ class PacketQueue {
   }
 }
 
-enum RelayOutcome { invalid, duplicate, uploaded, queued }
+enum RelayOutcome { invalid, duplicate, uploaded, queued, rateLimited, queueFull }
 
 /// Receiver-side pipeline: validate, de-duplicate, upload; if the upload does
 /// not succeed, queue and forward to further peers while the hop limit allows.
@@ -99,6 +145,10 @@ class RelayHandler {
   final SeenCache seen;
   final PacketQueue queue;
   final int Function() nowMs;
+
+  /// 3 packets per minute from one endpoint, 30 new ids per minute overall.
+  final SlidingRateLimiter perEndpoint;
+  final SlidingRateLimiter globalUnique;
 
   /// Must return true only when the packet is stored remotely.
   final Future<bool> Function(SosPacket) upload;
@@ -113,10 +163,16 @@ class RelayHandler {
     SeenCache? seen,
     PacketQueue? queue,
     this.maxHops = 5,
+    SlidingRateLimiter? perEndpoint,
+    SlidingRateLimiter? globalUnique,
   })  : seen = seen ?? SeenCache(),
-        queue = queue ?? PacketQueue();
+        queue = queue ?? PacketQueue(),
+        perEndpoint = perEndpoint ?? SlidingRateLimiter(max: 3),
+        globalUnique = globalUnique ?? SlidingRateLimiter(max: 30);
 
-  Future<RelayOutcome> handleRaw(String json) async {
+  Future<RelayOutcome> handleRaw(String json, {String endpointId = ''}) async {
+    // Every packet counts against its sender, valid or not.
+    if (!perEndpoint.allow(endpointId, nowMs())) return RelayOutcome.rateLimited;
     final SosPacket packet;
     try {
       final decoded = jsonDecode(json);
@@ -132,7 +188,9 @@ class RelayHandler {
     if (packet.validate(nowMs: nowMs(), maxHops: maxHops) != null) {
       return RelayOutcome.invalid;
     }
-    if (!seen.markIfNew(packet.id)) return RelayOutcome.duplicate;
+    if (seen.contains(packet.id)) return RelayOutcome.duplicate;
+    if (!globalUnique.allow('all', nowMs())) return RelayOutcome.rateLimited;
+    seen.markIfNew(packet.id);
 
     bool uploaded = false;
     try {
@@ -140,7 +198,13 @@ class RelayHandler {
     } catch (_) {}
     if (uploaded) return RelayOutcome.uploaded;
 
-    queue.add(packet);
+    // A full queue rejects the newcomer; it never drops a waiting alert.
+    if (!queue.add(packet)) {
+      seen.remove(packet.id);
+      return queue.items.any((e) => e.id == packet.id)
+          ? RelayOutcome.duplicate
+          : RelayOutcome.queueFull;
+    }
     if (packet.hop + 1 <= maxHops) {
       try {
         await forward(packet.nextHop());

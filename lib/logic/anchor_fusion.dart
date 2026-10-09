@@ -15,15 +15,29 @@ class AnchorFusion {
   const AnchorFusion(this.lat, this.lng, this.sigmaM, this.snapped);
 }
 
-/// A peer fix older than this is not used (moving landmarks go stale fast).
-const int anchorMaxAgeMs = 30 * 1000;
+/// A peer fix older than this is not used.
+const int anchorMaxAgeMs = 60 * 1000;
 
-/// Minimum sigma for a peer fix: its GPS error plus the unknown distance
-/// between the two phones.
-const double anchorMinSigmaM = 20;
+/// Allowance for the unknown distance between the two phones (ASSUMPTION).
+const double anchorSeparationM = 25;
+
+/// Walking speed used to widen the sigma of an older peer fix.
+const double anchorAgeSpeedMps = 1.5;
+
+/// An anchor this far from a confident estimate is treated as wrong.
+const double anchorMaxJumpM = 150;
+const double anchorConfidentSigmaM = 30;
+
+/// Sigma of a peer fix: sqrt(accuracy^2 + 25^2 + (1.5 m/s * age)^2).
+double anchorSigmaM(double accuracyM, {double ageS = 0}) {
+  final drift = anchorAgeSpeedMps * ageS;
+  return sqrt(accuracyM * accuracyM +
+      anchorSeparationM * anchorSeparationM +
+      drift * drift);
+}
 
 /// Fuses the estimate with a peer position treated as a measurement with
-/// sigma = max(peer accuracy, 20 m). If the estimate is further from the
+/// sigma = sqrt(peer accuracy^2 + 25^2) (plus age drift). If the estimate is further from the
 /// anchor than its own uncertainty, the estimate is judged wrong and snaps to
 /// the anchor; otherwise both are combined by inverse-variance weighting.
 AnchorFusion fuseAnchor({
@@ -33,8 +47,9 @@ AnchorFusion fuseAnchor({
   required double anchorLat,
   required double anchorLng,
   required double anchorAccuracyM,
+  double anchorAgeS = 0,
 }) {
-  final sa = max(anchorAccuracyM, anchorMinSigmaM);
+  final sa = anchorSigmaM(anchorAccuracyM, ageS: anchorAgeS);
   final se = max(estSigmaM, 1.0);
   final d = distanceM(estLat, estLng, anchorLat, anchorLng);
   if (d > se) return AnchorFusion(anchorLat, anchorLng, sa, true);

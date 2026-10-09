@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -27,6 +28,11 @@ class RelayService {
 
   final Map<String, SosPacket> _active = {};
   final Map<String, Timer> _expiry = {};
+  final LinkedHashSet<String> _beaconSeen = LinkedHashSet<String>();
+
+  /// How long the sender keeps a peer connected after handing over the packet,
+  /// so the helper's beacon reply can arrive.
+  static const Duration holdConnection = Duration(seconds: 20);
 
   late final AdvertisingController _adv = AdvertisingController(
     start: _startAdvertising,
@@ -127,6 +133,8 @@ class RelayService {
       final now = DateTime.now().millisecondsSinceEpoch;
       final b = parseBeacon(utf8.decode(bytes), now);
       if (b == null) return;
+      if (!_beaconSeen.add(b.dedupeKey)) return;
+      if (_beaconSeen.length > 50) _beaconSeen.remove(_beaconSeen.first);
       // The service isolate owns PDR; whether the beacon is used shows up in
       // its Diagnostics snapshot ("Last anchor").
       DiagnosticsHub.instance.forwardAnchor(b);
@@ -150,7 +158,7 @@ class RelayService {
       }
     }
     // Free the slot for the next peer once the bytes have been handed over.
-    Timer(const Duration(seconds: 5), () {
+    Timer(holdConnection, () {
       try {
         Nearby().disconnectFromEndpoint(endpointId);
       } catch (_) {}

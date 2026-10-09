@@ -54,6 +54,10 @@ void main() {
       expect(packet(ts: now + 3600000).validate(nowMs: now), isNotNull);
       expect(packet(ts: now - 3 * 24 * 3600000).validate(nowMs: now),
           isNotNull);
+      // 2 hour limit
+      expect(packet(ts: now - 119 * 60000).validate(nowMs: now), isNull);
+      expect(packet(ts: now - 121 * 60000).validate(nowMs: now),
+          'packet too old');
     });
 
     test('nextHop increments only the hop', () {
@@ -81,10 +85,11 @@ void main() {
       expect(q.add(packet(id: 'a')), isTrue);
       expect(q.add(packet(id: 'a')), isFalse);
       q.add(packet(id: 'b'));
-      q.add(packet(id: 'c'));
-      expect(q.items.map((e) => e.id), ['b', 'c']);
+      // full: the newcomer is rejected, waiting alerts are never evicted
+      expect(q.add(packet(id: 'c')), isFalse);
+      expect(q.items.map((e) => e.id), ['a', 'b']);
       final r = PacketQueue.decode(q.encode(), capacity: 2);
-      expect(r.items.map((e) => e.id), ['b', 'c']);
+      expect(r.items.map((e) => e.id), ['a', 'b']);
     });
 
     test('decode tolerates garbage', () {

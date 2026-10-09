@@ -74,7 +74,7 @@ class SosPacket {
   String? validate({
     required int nowMs,
     int maxHops = 5,
-    int maxAgeMs = 24 * 3600 * 1000,
+    int maxAgeMs = 2 * 3600 * 1000,
     int maxFutureSkewMs = 5 * 60 * 1000,
   }) {
     if (!_idPattern.hasMatch(id)) return 'bad id';

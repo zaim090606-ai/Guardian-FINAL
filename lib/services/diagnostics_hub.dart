@@ -65,7 +65,8 @@ class DiagnosticsHub {
   /// service isolate).
   void forwardAnchor(AnchorBeacon b) {
     try {
-      FlutterBackgroundService().invoke('anchor_beacon', b.toJson());
+      FlutterBackgroundService().invoke('anchor_beacon',
+          b.agedTo(DateTime.now().millisecondsSinceEpoch).toJson());
     } catch (_) {}
   }
 
