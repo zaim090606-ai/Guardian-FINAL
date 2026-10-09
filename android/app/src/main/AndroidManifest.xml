@@ -60,7 +60,7 @@
         <service
             android:name="id.flutter.flutter_background_service.BackgroundService"
             android:foregroundServiceType="location|dataSync|microphone"
-            android:exported="true"
+            android:exported="false"
             tools:replace="android:exported,android:foregroundServiceType">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"

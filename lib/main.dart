@@ -23,6 +23,7 @@ import 'services/diagnostics_hub.dart';
 import 'services/emergency_service.dart';
 import 'services/mesh_receiver_service.dart';
 import 'logic/anchor_beacon.dart';
+import 'logic/permission_report.dart';
 import 'services/pdr_services.dart';
 import 'services/relay_bridge.dart';
 import 'services/sos_countdown_service.dart';
@@ -109,37 +110,49 @@ class GrantedPermissions {
   const GrantedPermissions({required this.microphone, required this.location});
 }
 
-/// Requests every runtime permission the app can use. Missing ones switch the
-/// matching feature off; nothing here is required for the app to start.
+/// Requests every runtime permission the app can use, in the order a user can
+/// follow: location first (it explains the rest), then notifications,
+/// microphone, the Bluetooth/Nearby group (Android 12+/13+), then SMS. Missing
+/// ones switch the matching feature off and are listed on the Diagnostics
+/// screen; nothing here is required for the app to start.
 Future<GrantedPermissions> requestEmergencyPermissions() async {
-  final statuses = await [
-    Permission.sms,
-    Permission.phone,
-    Permission.locationWhenInUse,
-    Permission.microphone,
-    Permission.notification,
-    Permission.bluetoothScan,
-    Permission.bluetoothAdvertise,
-    Permission.bluetoothConnect,
-    Permission.nearbyWifiDevices,
-  ].request();
-
-  final location = statuses[Permission.locationWhenInUse]?.isGranted == true;
-  if (location) {
-    final bg = await Permission.locationAlways.request();
-    if (!bg.isGranted) debugPrint('Background location not granted.');
+  final granted = <String, bool>{};
+  Future<void> ask(String name, Permission p) async {
+    try {
+      granted[name] = (await p.request()).isGranted;
+    } catch (e) {
+      granted[name] = false;
+      debugPrint('Permission $name request failed: $e');
+    }
   }
 
-  if (await Permission.ignoreBatteryOptimizations.isDenied) {
-    await Permission.ignoreBatteryOptimizations.request();
+  await ask('location', Permission.locationWhenInUse);
+  if (granted['location'] == true) {
+    await ask('locationAlways', Permission.locationAlways);
   }
+  await ask('notification', Permission.notification);
+  await ask('microphone', Permission.microphone);
+  await ask('bluetoothScan', Permission.bluetoothScan);
+  await ask('bluetoothAdvertise', Permission.bluetoothAdvertise);
+  await ask('bluetoothConnect', Permission.bluetoothConnect);
+  await ask('nearbyWifiDevices', Permission.nearbyWifiDevices);
+  await ask('sms', Permission.sms);
+  await ask('phone', Permission.phone);
 
-  final mic = statuses[Permission.microphone]?.isGranted == true;
-  if (!mic) debugPrint('Microphone permission missing: audio triggers off.');
-  if (statuses[Permission.sms]?.isGranted != true) {
-    debugPrint('SMS permission missing: SMS channel will be skipped.');
+  try {
+    if (await Permission.ignoreBatteryOptimizations.isDenied) {
+      await Permission.ignoreBatteryOptimizations.request();
+    }
+  } catch (_) {}
+
+  DiagnosticsHub.permissionIssues.value = describeDenied(granted);
+  for (final line in DiagnosticsHub.permissionIssues.value) {
+    debugPrint(line);
   }
-  return GrantedPermissions(microphone: mic, location: location);
+  return GrantedPermissions(
+    microphone: granted['microphone'] == true,
+    location: granted['location'] == true,
+  );
 }
 
 /// Creates the notification channel and configures the foreground service.
@@ -171,6 +184,9 @@ Future<void> initializeBackgroundService({
     androidConfiguration: AndroidConfiguration(
       onStart: onStartService,
       autoStart: false,
+      // Android 14+ refuses a microphone/location foreground service started
+      // from BOOT_COMPLETED. Guardian starts only after the user opens the app.
+      autoStartOnBoot: false,
       isForegroundMode: true,
       notificationChannelId: 'guardian_safety_channel',
       initialNotificationTitle: 'Guardian Safety Active',

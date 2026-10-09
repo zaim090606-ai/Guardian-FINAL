@@ -23,6 +23,13 @@ class DiagnosticsHub {
   /// UI isolate: the PDR snapshot the service published last, or null.
   static PdrSnapshot? pdrSnapshot() => PdrSnapshot.fromJson(remote.value['pdr']);
 
+  /// Features switched off because a permission was denied, and numbers the
+  /// SMS channel skipped as invalid (UI isolate).
+  static final ValueNotifier<List<String>> permissionIssues =
+      ValueNotifier<List<String>>(const []);
+  static final ValueNotifier<List<String>> skippedNumbers =
+      ValueNotifier<List<String>>(const []);
+
   final EventLog relayEvents = EventLog(capacity: 10);
 
   bool advertising = false;

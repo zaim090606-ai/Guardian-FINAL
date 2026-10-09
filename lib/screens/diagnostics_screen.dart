@@ -138,6 +138,18 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
           if (!running)
             _banner('PDR not running: the background service is not reporting'),
           if (simulated) _banner('SIMULATED: GPS is being ignored on purpose'),
+          ValueListenableBuilder<List<String>>(
+            valueListenable: DiagnosticsHub.permissionIssues,
+            builder: (_, issues, __) => Column(children: [
+              for (final m in issues) _banner(m),
+            ]),
+          ),
+          ValueListenableBuilder<List<String>>(
+            valueListenable: DiagnosticsHub.skippedNumbers,
+            builder: (_, nums, __) => nums.isEmpty
+                ? const SizedBox.shrink()
+                : _banner('SMS skipped invalid numbers: ${nums.join(", ")}'),
+          ),
           _section('Location', [
             _row('Source', fix == null ? 'none yet' : fix.source.toUpperCase()),
             _row('Uncertainty',
