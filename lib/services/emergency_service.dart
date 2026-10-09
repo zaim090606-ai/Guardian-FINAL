@@ -514,27 +514,58 @@ class EmergencyService {
   /// SMS channel reports that clearly.
   static Future<List<String>> _loadContactsFast() async {
     final numbers = <String>{};
+    final skipped = <String>{};
+    void take(String raw) {
+      if (raw.trim().isEmpty) return;
+      final n = normalizeContactNumber(extractRaw(raw));
+      if (n == null) {
+        skipped.add(raw.trim());
+      } else {
+        numbers.add(n);
+      }
+    }
+
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.reload();
       for (final entry in prefs.getStringList('emergency_contacts') ?? const <String>[]) {
-        numbers.add(extractPhone(entry));
+        take(entry);
       }
       final single = prefs.getString(_contactKey);
-      if (single != null && single.isNotEmpty) numbers.add(normalizePhone(single));
+      if (single != null && single.isNotEmpty) take(single);
       final cached = prefs.getString(_cloudContactsKey);
       if (cached != null && cached.isNotEmpty) {
         final list = jsonDecode(cached);
         if (list is List) {
           for (final n in list) {
-            numbers.add(normalizePhone('$n'));
+            take('$n');
           }
         }
       }
+      // Shown on the Diagnostics screen, whichever isolate sent the SOS.
+      await prefs.setString(_skippedNumbersKey, jsonEncode(skipped.toList()));
     } catch (e) {
       debugPrint('Local contacts unreadable: $e');
     }
-    return numbers.where((n) => n.isNotEmpty).toList();
+    if (skipped.isNotEmpty) {
+      debugPrint('SMS: ${skipped.length} invalid contact number(s) skipped.');
+    }
+    return numbers.toList();
+  }
+
+  static const String _skippedNumbersKey = 'sms_skipped_numbers';
+
+  /// Contact entries the last SOS skipped because they were not valid numbers.
+  static Future<List<String>> readSkippedNumbers() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      final raw = prefs.getString(_skippedNumbersKey);
+      if (raw == null || raw.isEmpty) return const [];
+      return (jsonDecode(raw) as List).map((e) => '$e').toList();
+    } catch (_) {
+      return const [];
+    }
   }
 
   /// Refreshes the local copy of the signed-in user's Firestore contacts.

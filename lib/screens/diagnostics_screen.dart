@@ -47,6 +47,9 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
     try {
       attempts = await EmergencyService.readAttemptLog();
     } catch (_) {}
+    try {
+      DiagnosticsHub.skippedNumbers.value = await EmergencyService.readSkippedNumbers();
+    } catch (_) {}
     if (mounted) setState(() => _attempts = attempts);
   }
 

@@ -204,6 +204,35 @@ void main() {
     });
   });
 
+  group('normalizeContactNumber', () {
+    test('strips spaces, dashes, dots and brackets', () {
+      expect(normalizeContactNumber('(987) 654-3210'), '+919876543210');
+      expect(normalizeContactNumber(' 98765.43210 '), '+919876543210');
+      expect(normalizeContactNumber('+44 (20) 7946 0958'), '+442079460958');
+    });
+    test('10-digit Indian mobiles get +91, also with 0 or 91 in front', () {
+      expect(normalizeContactNumber('9876543210'), '+919876543210');
+      expect(normalizeContactNumber('09876543210'), '+919876543210');
+      expect(normalizeContactNumber('919876543210'), '+919876543210');
+    });
+    test('numbers that start with + or 00 keep their country code', () {
+      expect(normalizeContactNumber('+14155550123'), '+14155550123');
+      expect(normalizeContactNumber('0014155550123'), '+14155550123');
+      expect(normalizeContactNumber('00 91 98765 43210'), '+919876543210');
+    });
+    test('invalid numbers are null', () {
+      for (final bad in ['', '   ', 'abc', '12345', '5876543210', '+12', '98765x3210',
+          '+1234567890123456', '00', '++919876543210', '1234567890123456']) {
+        expect(normalizeContactNumber(bad), isNull, reason: bad);
+      }
+    });
+    test('normalizePhone and extractPhone give an empty string for invalid', () {
+      expect(normalizePhone('abc'), '');
+      expect(extractPhone('Mom (12345)'), '');
+      expect(extractPhone('Mom (98765 43210)'), '+919876543210');
+    });
+  });
+
   group('extractPhone', () {
     test('reads the number from the stored Name (phone) format', () {
       expect(extractPhone('Mom 2 (98765 43210)'), '+919876543210');
