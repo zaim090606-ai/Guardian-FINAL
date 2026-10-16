@@ -1,0 +1,141 @@
+// PROPOSED, not deployed, not emulator-tested.
+// Private-subdocument schema for Guardian. Review and run against the Firestore emulator before any deploy.
+// The local firestore.rules (not in this repo) is open ("allow read, write: if true"); never deploy that one to production.
+// test/rules_schema_test.dart only checks that the field lists in this file match the app.
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function str(d, k, n) { return !(k in d) || (d[k] is string && d[k].size() <= n); }
+    function num(d, k) { return !(k in d) || d[k] is number; }
+    function bool_(d, k) { return !(k in d) || d[k] is bool; }
+
+    function validPlace(d) {
+      return (!('latitude' in d) || (d.latitude is number && d.latitude >= -90 && d.latitude <= 90))
+          && (!('longitude' in d) || (d.longitude is number && d.longitude >= -180 && d.longitude <= 180));
+    }
+
+    // Size and type limits shared by every write to an alert document.
+    function validAlert(d) {
+      return validPlace(d)
+          && str(d, 'eventType', 40) && str(d, 'riskLevel', 100)
+          && str(d, 'alertMessage', 1000) && str(d, 'status', 40)
+          && str(d, 'audioStatus', 40) && str(d, 'locationSource', 20)
+          && str(d, 'locationContext', 20)
+          && num(d, 'force') && num(d, 'locationUncertaintyM') && num(d, 'locationAgeS')
+          && num(d, 'locationFixTimeMs') && num(d, 'anchorAgeS') && num(d, 'anchorRadiusM')
+          && bool_(d, 'isDeadReckoning') && bool_(d, 'anchorUsed') && bool_(d, 'locationSimulated')
+          && (!('sosAttempts' in d) || (d.sosAttempts is list && d.sosAttempts.size() <= 30));
+    }
+
+    // SOS alerts. Read by the public tracking pages by id (public/index.html).
+    match /emergency_logs/{alertId} {
+      // The tracking link /alert/<id>: one document by id, no sign-in needed.
+      // Ids are 20+ random characters; the link is the secret.
+      allow get: if true;
+      allow list: if false;
+
+      // The phone that raises the alert: userId must be its own uid.
+      // Keys are limited to the list below (keep in step with AlertSchema).
+      allow create: if signedIn()
+        && alertId.size() >= 20
+        && request.resource.data.userId == request.auth.uid
+        && (
+          // origin phone
+          request.resource.data.keys().hasOnly([
+            'userId', 'eventType', 'riskLevel', 'force', 'alertMessage',
+            'latitude', 'longitude', 'locationSource', 'locationUncertaintyM',
+            'isDeadReckoning', 'locationFixTimeMs', 'locationAgeS',
+            'locationContext', 'anchorUsed', 'anchorAgeS', 'anchorRadiusM',
+            'locationSimulated', 'status', 'audioStatus', 'timestamp',
+            'lastLiveUpdate', 'sosAttempts'])
+          ||
+          // relaying phone: owned by the relayer, marked relayed
+          (request.resource.data.relayed == true
+           && request.resource.data.keys().hasOnly([
+            'userId', 'eventType', 'riskLevel', 'alertMessage',
+            'latitude', 'longitude', 'locationSource', 'locationUncertaintyM',
+            'isDeadReckoning', 'status', 'relayed', 'relayedByMesh', 'relayedAt',
+            'relayHop', 'originTimestamp', 'simulated']))
+        )
+        && validAlert(request.resource.data);
+
+      allow update: if signedIn() && validAlert(request.resource.data) && (
+        // the owner (not a relayed document)
+        (resource.data.userId == request.auth.uid
+         && request.resource.data.userId == request.auth.uid
+         && !('relayed' in resource.data)
+         && request.resource.data.keys().hasOnly([
+            'userId', 'eventType', 'riskLevel', 'force', 'alertMessage',
+            'latitude', 'longitude', 'locationSource', 'locationUncertaintyM',
+            'isDeadReckoning', 'locationFixTimeMs', 'locationAgeS',
+            'locationContext', 'anchorUsed', 'anchorAgeS', 'anchorRadiusM',
+            'locationSimulated', 'status', 'audioStatus', 'timestamp',
+            'lastLiveUpdate', 'sosAttempts', 'relayedByMesh', 'relayedAt',
+            'relayHop']))
+        // any signed-in phone that relayed it may only touch the relay keys
+        || request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['relayedByMesh', 'relayedAt', 'relayHop'])
+      );
+
+      allow delete: if false;
+
+      // Personal data (phone, transcript, audio link and analysis, AI summary)
+      // never lives in the public document. Only the alert's owner reads it.
+      match /private/{doc} {
+        allow read: if signedIn()
+          && get(/databases/$(database)/documents/emergency_logs/$(alertId)).data.userId == request.auth.uid;
+        allow create, update: if signedIn()
+          && request.resource.data.userId == request.auth.uid
+          && get(/databases/$(database)/documents/emergency_logs/$(alertId)).data.userId == request.auth.uid
+          && request.resource.data.keys().hasOnly([
+            'userId', 'userPhone', 'transcript', 'audioUrl', 'audioAnalysis',
+            'audioUploadedAt', 'aiSummary'])
+          && str(request.resource.data, 'userPhone', 40)
+          && str(request.resource.data, 'transcript', 4000)
+          && str(request.resource.data, 'audioUrl', 1000)
+          && str(request.resource.data, 'audioAnalysis', 4000)
+          && str(request.resource.data, 'aiSummary', 2000);
+        allow delete: if false;
+      }
+    }
+
+    // Per-user profile and emergency contacts.
+    match /users/{uid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
+      match /contacts/{contactId} {
+        allow read, write: if signedIn() && request.auth.uid == uid;
+      }
+    }
+
+    // Legacy root contacts collection (lib/screens/Guardian.dart): phone numbers,
+    // so signed-in users only.
+    match /trusted_contacts/{id} {
+      allow read, write: if signedIn();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Known limits and flows to check before deploying
+//  1. Tracker page: deploy the NEW public/index.html first (it reads only
+//     emergency_logs/<id> and no longer shows audio, which is now private).
+//  2. No list query: opening the tracker without an id shows "No emergency ID".
+//  3. A phone that is not signed in cannot write. The app keeps the alert and
+//     sends it after sign-in (AuthService); SMS and the relay are unaffected.
+//  4. If a relaying phone uploads an alert BEFORE the origin phone, the document
+//     belongs to the relayer. The origin's later updates (live location) are
+//     then denied: the tracker keeps the location from the relayed packet.
+//     Packets are unsigned, so the origin cannot be proven; this is accepted.
+//  5. Anyone holding the tracking link can read that alert's public fields
+//     (location, status, message text). Treat links as secrets.
+//  6. Mesh test packets use ids "test-" + 20 random characters (>= 20 chars).
+//  7. Firebase Storage has its own rules (none in this repo); this file does
+//     not change them.
+//  8. The rules have not been run in the emulator.
+// ---------------------------------------------------------------------------
