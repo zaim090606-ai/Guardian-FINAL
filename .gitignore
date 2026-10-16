@@ -61,3 +61,11 @@ local.properties
 key.properties
 .firebase/
 .kotlin/
+
+# Keys / private build output
+*.keystore
+*.pem
+*.p12
+/Guardian_APK/
+/Guardian_APK_private/
+Guardian_APK*/
