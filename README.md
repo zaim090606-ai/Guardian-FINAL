@@ -12,7 +12,7 @@
 
 Scan the QR code below to download the Android app.
 
-![Guardian APK Download QR Code](guardian-qr.png)
+<img src="guardian-qr.png" alt="Guardian APK Download QR Code" width="200">
 
 [Download Guardian APK](https://github.com/zaim090606-ai/Guardian-FINAL/releases/download/v1.0.0/app-release.apk)
 
