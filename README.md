@@ -8,7 +8,15 @@
 [![Platform](https://img.shields.io/badge/Platform-iOS%20%7C%20Android%20%7C%20Web-blueviolet.svg)](https://flutter.dev)
 
 ---
+## Download Guardian
 
+Scan the QR code below to download the Android app.
+
+![Guardian APK Download QR Code](guardian-qr.png)
+
+[Download Guardian APK](https://github.com/zaim090606-ai/Guardian-FINAL/releases/download/v1.0.0/app-release.apk)
+
+---
 ## 📱 Features
 
 ### 🚨 Emergency Response
